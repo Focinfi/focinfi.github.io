@@ -1,0 +1,27 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> Rails 学习感想 · 王安正的随想集</title><meta name="description" content="Rails 学习感想 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">BLOG</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">ARCHIVE</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">GITHUB</a></li><li class="nav-list-item"><a href="/atom.xml" target="_self" class="nav-list-link">RSS</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">Rails 学习感想</h1><div class="post-info">2016年7月30日</div><div class="post-content"><p>后端(应用层)不同于前端，最重要的概念是 middleware/pipeline.</p>
+<p>Rails能较为深入的理解一定要建立在对后端整体架构理解架构的基础上，不然就会进入开始很爽越来越晕的尴尬节奏。</p>
+<p>大致分为两大部分：Server/App，一个负责接收分发 request，一个负责业务逻辑，他们之间的数据对接靠 Rack 规范。Server 具体可参考<a href="http://insights.thoughtworkers.org/ruby-web-server/" target="_blank" rel="external">这篇文章</a>。而 App 部分就是 Rails。</p>
+<a id="more"></a>
+<p>Rails干的活一句话就是一个按照 Rack 标准数据格式化的 Request 进来，分析url，分配给它一个 Handler 方法处理：</p>
+<ol>
+<li>解析 url 参数，HTTP header/body</li>
+<li>身份验证，权限验证</li>
+<li>Database操作</li>
+<li>渲染需要返回的数据（html/json）</li>
+</ol>
+<p>当然为了控制 App 的逻辑复杂度，Rails 采用 MVC 架构，遵循 convention over configuration，don’t repeat yourself 理念，尽量将 Server API 设计的 restful.</p>
+<p>Rails 重要的组件都是根据 Handler 来，ActionController，ActiveRecord(ORM)，ActiveView(view).</p>
+<p>然后对一个项目还有：配置，第三方库管理(bundler)，测试(RSpec/factory_girl)</p>
+<p>这里要提一下Rspec，对于魔法语言 Ruby 来说，只有相对完善的测试(最好TDD)心里才踏实，推荐一本书《Everyday Rails Testing With RSpec》。</p>
+<p>有时有些 Request 是好是操作，我们需要后台任务，需要了解 sidekiq.<br>对于 HTML 有时可能需要 Cache，这时简单粗暴的内存KV数据库 memcached。</p>
+<p>有哪些地方容易写出坑：</p>
+<ol>
+<li>低效 SQL，所以对 SQL 也要有一定了解，知道一个链式 ActiveRecord 操作背后执行的哪条 SQL，而且对所用数据库(MySQL/Postgresql/MongoDB)有一定了解。</li>
+<li>尽可能不要在 View 中写业务逻辑。</li>
+<li>Controller 中有过多逻辑。</li>
+<li>当我们把逻辑从 Controller 迁入 Model，Model 会迅速臃肿起来。</li>
+</ol>
+<p>对 Ruby 的理解需要达到什么程度？看懂《Ruby元编程》。</p>
+<p>拓展阅读：</p>
+<p><a href="https://mp.weixin.qq.com/s?__biz=MzA3NDM0ODQwMw==&amp;mid=401924543&amp;idx=1&amp;sn=97de2e09c9fddfd905992c19aedb6182&amp;scene=1&amp;srcid=0730MmAb3a0bs0HtO0GyOAbP&amp;key=8dcebf9e179c9f3a0589ae28e0d6829d48d7e01e146408d73bc2fcd163de2bb20c17b7e5f8c582d1109f4adf2b0f4ea0&amp;ascene=0&amp;uin=MjA4NTM1NTg0Mw%3D%3D&amp;devicetype=iMac+MacBookPro12%2C1+OSX+OSX+10.11.1+build(15B42" target="_blank" rel="external">再谈 API 的撰写 - 架构-程序人生</a>&amp;version=11020201&amp;pass_ticket=EvQu1mLjNIQgfDQzipqPKaiaNiwUHzLpvnKsZoBfqUj7hTuQwuh6h1ek41Z%2FyBj7)</p>
+</div></article></div></main><footer><div class="paginator"><a href="/2016/06/03/golang-poller/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

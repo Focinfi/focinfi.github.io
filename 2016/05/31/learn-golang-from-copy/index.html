@@ -1,0 +1,23 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> 通过抄写学 golang · 王安正的随想集</title><meta name="description" content="通过抄写学 golang - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">BLOG</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">ARCHIVE</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">GITHUB</a></li><li class="nav-list-item"><a href="/atom.xml" target="_self" class="nav-list-link">RSS</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">通过抄写学 golang</h1><div class="post-info">2016年5月31日</div><div class="post-content"><p>golang 专注于软件工程的实用性，学习起来不同于其他一些很 magic 的编程语言，我们要遵循标准和一些范式。</p>
+<p>最好的资料就是 golang 的标准库源代码，只是有些库本身要处理的事情比较复杂，或者需要一定的知识储备，导致我们很难在短时间内理清脉络深入学习。那么我们需要一些小巧精悍适合初学者的开源库，我们可以按照这些标准找：</p>
+<ol>
+<li>符合 golang 标准，使用地道的编程范式。</li>
+<li>完善文档和测试。</li>
+<li>核心功能尽可能集中，代码规模尽可能的小。</li>
+</ol>
+<a id="more"></a>
+<p>下面是我自己在寻觅的过程中感觉还不错的几个开源库：</p>
+<h4 id="语法：gorilla-context"><a href="#语法：gorilla-context" class="headerlink" title="语法：gorilla/context"></a>语法：<a href="https://github.com/gorilla/context" target="_blank" rel="external">gorilla/context</a></h4><p>这个核心代码只有 100 行左右的小库，可以让我们学习到 golang 中 map 和 sync.RWMutex 在实践中的使用，更为重要的是，从中我们可以学习软件工程的一些优秀实践：注释，测试，命名等。</p>
+<h4 id="HTTP：urfave-negroni"><a href="#HTTP：urfave-negroni" class="headerlink" title="HTTP：urfave/negroni"></a>HTTP：<a href="https://github.com/urfave/negroni" target="_blank" rel="external">urfave/negroni</a></h4><p>这个库核心代码也是 100 行左右，其功能就是为 <code>http.Handler</code> 添加 middleware 功能。这个库值得学习的地方在于理解 net/http 的设计理念，看看实践中如何用 interface 降低模块之间的耦合度以及如何设计模块和模块之间的关系。</p>
+<h4 id="gorutine：go-playground-pool"><a href="#gorutine：go-playground-pool" class="headerlink" title="gorutine：go-playground/pool"></a>gorutine：<a href="https://github.com/go-playground/pool" target="_blank" rel="external">go-playground/pool</a></h4><p>核心代码 150 行，主要功能是实现了一个 gorutine 的 pool，抄写这个库的代码可以了解 golang 中 gorutine 的基本概念，channel 和 select 的使用方式以及如何用 sync.WaitGroup 管理 gorutine 。</p>
+<p>实践抄写的过程中，可以带着这些问题：</p>
+<ol>
+<li>这个开源库的边界、对外接口或者叫核心功能是什么？</li>
+<li>这个开源库在实现的过程中考虑了那些边界条件，如何把握效率与可用性之间的平衡点？</li>
+<li>这个开源库用到了哪些内置库，如何使用的？</li>
+<li>如果只看 README 和 go doc 输出的对外接口，能否在不了解内部实现的情况下自己写出来？</li>
+<li>如果源码中有些东西我不熟悉，看过源码，理清思路后能否默写出来？</li>
+<li>完成实现后，如何写出简单易读并且覆盖完善的测试？</li>
+</ol>
+<p>这是我之前练习 gorilla/context 写的文章，大家可以参考一下我当时的思路：<br><a href="http://www.jianshu.com/p/2e7ad8640c56" target="_blank" rel="external">Golang 学习 – “听写” gorilla/context</a></p>
+</div></article></div></main><footer><div class="paginator"><a href="/2016/06/03/golang-poller/" class="prev">上一篇</a><a href="/2016/05/05/learn-golang-from-huffman/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>
