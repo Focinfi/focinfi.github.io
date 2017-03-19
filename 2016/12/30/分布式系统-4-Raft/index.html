@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> 分布式系统-4-Raft · 王安正的随想集</title><meta name="description" content="分布式系统-4-Raft - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">分布式系统-4-Raft</h1><div class="post-info">2016年12月30日</div><div class="post-content"><blockquote>
+<p>上节知识准备：<a href="http://www.jianshu.com/p/b4fc9b933d20" target="_blank" rel="external">主从复制</a><br>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf" target="_blank" rel="external">Raft-extended</a></p>
+</blockquote>
+<p>前面聊到主从复制提高可用性，但是简单的主从复制需要解决的 “裂脑问题”：由于各种原因导致集群分成几个小集群，每个小集群都以为别的机器无法服务了，各自为主，无法提供正常的服务。解决办法也很简单，就是在一个主从集合中保证同时只有一个 Master 响应客户端的请求。面我们来聊聊一致性算法：Raft。</p>
+<p>在 90 年代出现 Paxos 一致性算法后，所有的一致性算法的发展和实践都是以此为基础，事实上 Paxos 相当难理解，它本质上时提出了一系列思路，需要工程师根据自己需求进行取舍来实现合适的一致性模型。而 Raft 的首要设计目标是保证一致性逻辑正确性的基础上，尽可能容易理解。</p>
+<p>首先我们得明白作为一个复制状态机集群保障一致性的算法，需要解决什么问题：</p>
+<ol>
+<li>没有 Master 时需要选举出下一个 Master，且要保证同时只有一个 Master</li>
+<li>机器重连后的 log（状态机命令序列） 同步</li>
+</ol>
+<p>在 Raft 中，一个集群的每个机器可能是 Leader，Follower 和 Candidate 三种之一的角色。Leader 负责跟客户端交互，Follower 负责接收 Leader 操作备份命令，而 Candidate 在集群中没有 Leader 时，准备竞选的角色。</p>
+<p>每台机在不同的条件下在三种角色中切换来保证系统的一致性，那具体的是如何解决上面说的三个问题的？</p>
+<p>问题一方案：</p>
+<ol>
+<li><p>集群的数量(sum) 必须是大于 1 的奇数。</p>
+</li>
+<li><p>每个机器都启动一个定时器，当一定时间内没有收到来自 Leader 的消息，则视为 Leader 已不可用，从 Follower 转换成 Candidate，准备选举 Leader。</p>
+</li>
+<li><p>选举过程中，每个机器只可选一个 Candidate，而且必须得到大于 sum/2 个投票才可当选为 Leader。</p>
+</li>
+<li><p>当同时有两个 Candidate 竞选 Leader 时，有可能每个 Candidate 都拿不到多数选票，因为选举也有 timeout，而且是一定范围的随机，所以只要出现多个 Candidate，就简单的重置定时器而已。性能不一定最高，但简单且健壮。</p>
+</li>
+</ol>
+<p>问题二方案：</p>
+<ol>
+<li><p>对于一个集群来说，每次从无 Leader 到进行选举是一个阶段(Term)，所以在旧阶段失联的机器重连后，判断当前集群所在的阶段，若已落后，则无条件用 Leader 的 log 覆盖自己的，成为一个 Follower。</p>
+</li>
+<li><p>所以在 Raft 中，只有 Leader 向 Follower 发送 log，这简化了复制过程，但在某些条件下，系统的复制性能会下降。</p>
+</li>
+<li><p>对于每个客户端请求，只有在超过半数机器复制成功(log 写入成功)时，才能向客户端响应成功。</p>
+</li>
+<li><p>同样在选举时，log 数量多的 Candidate 拥有更高的权重。</p>
+</li>
+</ol>
+<p>论文中详细讨论了 Raft 的 log 复制机制，如何保证各种条件下系统的安全性，动态更换一个集群的机器配置，log 压缩以及性能评估。</p>
+<p>我们还准备一个循序渐进，文档丰富，环境友好的用 Raft 算法实现分布式 KV 数据库实验项目，<a href="http://www.jianshu.com/p/fcda437e560a" target="_blank" rel="external">实验二 Raft算法实现</a>。</p>
+</div></article></div></main><footer><div class="paginator"><a href="/2017/01/06/分布式系统-5-Zookeeper/" class="prev">上一篇</a><a href="/2016/12/23/分布式系统-3-主从复制/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

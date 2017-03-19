@@ -1,0 +1,77 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> SuperBall开发总结(六)-UI动画设计 · 王安正的随想集</title><meta name="description" content="SuperBall开发总结(六)-UI动画设计 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">SuperBall开发总结(六)-UI动画设计</h1><div class="post-info">2014年10月6日</div><div class="post-content"><p>有了前几节(点击左上角列表按钮)的游戏制作铺垫，我们可以按照自己的想法添加一些元素，比如我自己添加了BOSS的动作，BOSS的武器等。</p>
+<p>除了在canvas中绘制一些动画效果，我们还可以对DOM进行一些操作，思路是一样的。</p>
+<p>接下来我想介绍一下一个UI的动画效果。</p>
+<p>####完成后的效果</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/17174-68743ea1b37cc3fa.png" alt="UI.png"></p>
+<p>运行效果：<a href="http://jsfiddle.net/Focinfi/gp1uq2by/12/" target="_blank" rel="external">SuperBall_04-Add_UI_Animation</a></p>
+<p>####添加UI</p>
+<p>这里我们添加了一个最外面的容器<code>#content</code>，将要显示的UI<code>#skills_list #score_board</code>加入进去。</p>
+<pre><code>&lt;div id=&quot;content&quot;&gt;
+    &lt;canvas id=&quot;super_ball_canvas&quot; width=&quot;300&quot; height=&quot;300&quot;
+        style=&quot;
+            border-top:3px grey solid;
+            border-bottom:1px black solid;
+            border-radius: 10px;
+            display: block;
+            position: relative;
+            margin: 10px auto&quot;&gt;&lt;/canvas&gt;
+
+    &lt;div id=&quot;skills_list&quot;&gt;&lt;/div&gt;
+
+    &lt;div id=&quot;score_board&quot;&gt;&lt;/div&gt;
+
+&lt;/div&gt;
+</code></pre><p>添加一些CSS样式</p>
+<pre><code>#content{
+    ...   
+}
+
+/*left board*/
+#skills_list{
+...
+}
+
+/*right board*/
+#score_board{
+    ...    
+}
+</code></pre><p>####添加setUIAnimation()</p>
+<pre><code>function setUIAnimation(){
+
+        var countdown_start_num = 355;
+        var content_left_board = document.getElementById(&quot;skills_list&quot;);
+        var content_right_board = document.getElementById(&quot;score_board&quot;);
+        var ui_animation_interval = setInterval(
+                function(){
+                    if(countdown_start_num &gt;= 0){
+                        content_left_board.setAttribute(&quot;style&quot;, &quot;left:&quot; + (-1 * (35.5 - countdown_start_num/10)).toString() + &quot;%&quot;);
+                        content_right_board.setAttribute(&quot;style&quot;, &quot;left:&quot; + (100 - countdown_start_num/10).toString() + &quot;%&quot;);
+                        countdown_start_num--;
+
+                    }else{
+                        clearInterval(ui_animation_interval);
+                    }
+
+                },
+                frequency/2
+        );
+    }
+</code></pre><ol>
+<li><p>设置动画时间<code>countdown_start_num</code></p>
+</li>
+<li><p>获取<code>#skills_list #score_board</code></p>
+</li>
+<li><p>设置<code>ui_animation_interval</code>,这里的<code>clearInterval()</code>函数是用来终止死循环的，其参数是要终止循环的名字或ID。</p>
+</li>
+<li><p>其实这和之前的canvas绘图类似</p>
+<ol>
+<li><p><code>render()</code> =&gt; <code>content_leftBoard.setAttribute(...);</code></p>
+</li>
+<li><p><code>checkHit()</code> =&gt; <code>if(countdown_start_num &lt; 0){}else{}</code></p>
+</li>
+<li><p><code>update()</code> =&gt; <code>countdown_start_num--;</code></p>
+</li>
+</ol>
+</li>
+</ol>
+</div></article></div></main><footer><div class="paginator"><a href="/2014/10/13/SuperBall开发总结(四)-BOSS出场/" class="prev">上一篇</a><a href="/2014/09/29/SuperBall开发总结(五)-优化项目结构/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

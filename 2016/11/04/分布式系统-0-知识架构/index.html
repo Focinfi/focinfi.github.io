@@ -1,0 +1,19 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> 分布式系统-0-知识架构 · 王安正的随想集</title><meta name="description" content="分布式系统-0-知识架构 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">分布式系统-0-知识架构</h1><div class="post-info">2016年11月4日</div><div class="post-content"><p>分布式系统的分布式是指多台机器组成一个整体，具备存储和计算能力，理想情况下一个分布式系统可以像单机一样使用，只需要增加机器就可以提升整体性能。</p>
+<p>巧豆一麻袋，为什么费那么大劲组合一堆机器而不是用配置更好的单机？是的，在大数据到来之前，很多公司就是靠做高配机器大赚政府和大企业的钱。但是像谷歌脸书等互联网企业诞生后，他们的数据以指数级速度增长，所以他们根本负担不起高配机器的费用，与此同时，要存数据也不再单纯的 SQL 数据，而是像网页，图片等非结构化数据。在这些需求下，谷歌在实践中总结了三篇影响深远的论文（MapReduce/GFS/Big Table），然后之后的分布式系统基本是在实现和扩展论文的内容。这里多说一句，为什么是谷歌？因为他们首先遇到问题，为了生存下去，不得不开展新的技术，可以想象03年他们文件系统集群存储的设计目标就是 100TB 级别了。</p>
+<p>所以，分布式系统就是管理很多廉价机器，通过复制备份保证在一些机器宕机或者网络故障时，整个系统还能正确的继续提供服务，而且失联的机器恢复后，可以再次融入系统中，机器的数量正比于系统性能。</p>
+<p>所以面对不稳定的网络环境，错综复杂的机器状态，在少数机器不可用时，保证其他机器还能正确服务，同时还要尽可能提高并发，可以想象其复杂程度。所以理解好不同场景下的分布式模型，其他模型都比较容易了，毕竟打了大Boss，小怪都很轻松。</p>
+<p>老实讲，搞分布式真的是人类自虐的游戏。但为了<strong>增加辣鸡机器就能提升性能</strong>的伟大目标，让我们来研究一波吧。</p>
+<p>巧豆一麻袋，相对于提升单机配置的纵向扩展，增加机器的横向扩展又啥特点？</p>
+<p>简单的说横向扩展带来的问题是业务逻辑的程序要处理分布式系统中的复杂度，所以业务代码需要考虑的系统复杂度越多，开发效率就会越慢，出错的可能性就会越大。</p>
+<p>MIT 6.428 课程系统介绍了当今分布式系统的不同场景下的实践方案，课程资料是论文和教授上课使用的教案，没有视频，所以学习起来门槛较高。所以如果有研究精神可以直接看论文，或者直接去上课。</p>
+<p>本系列文章旨在为大家建立分布式系统知识体系架构，用案例丰富架构，而且每个案例都都相对独立以便于深入学习。</p>
+<p>好了，我们来了解一下整个分布式系统的核心目标：对应用程序隐藏分布式系统的复杂度。主要设计三个大的方面：存储，通讯和计算。</p>
+<p>wait，这不是和操作系统管理进程所处理的内存，进程间通信，CPU一样？Good question，经得起考验的模型更接近于真理。没错，在分布式系统中，每台机器可以简单地理解为一个 worker，即单机的一个进程。</p>
+<p>我们将面临三大问题：</p>
+<ol>
+<li>通讯：远程调用，线程，并发控制</li>
+<li>性能：为保证一致性，使用多机备份和负载问题</li>
+<li>容错：复制副本提升可用性和数据持久性。</li>
+</ol>
+<p><a href="/tags/Distributed/">系列文章</a></p>
+</div></article></div></main><footer><div class="paginator"><a href="/2016/11/11/分布式系统-1-MapReduce/" class="prev">上一篇</a><a href="/2016/07/30/rails-note-for-fe-developer/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

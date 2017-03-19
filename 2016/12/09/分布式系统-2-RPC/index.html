@@ -1,0 +1,18 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> 分布式系统-2-RPC · 王安正的随想集</title><meta name="description" content="分布式系统-2-RPC - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">分布式系统-2-RPC</h1><div class="post-info">2016年12月9日</div><div class="post-content"><p>在开篇 <a href="http://www.jianshu.com/p/32a41f48dc80" target="_blank" rel="external">分布式系统-0-知识架构</a> 我们介绍了分布式系统的背景和需要解决的问题。其中提到分布式设计主要涉及通讯、容错和性能三个方面，今天我们来聊一聊通讯。</p>
+<p>我们先来看看单机的多线程编程，由于在一个进程中大家用的都是同一个代码段，所以只需要在编程语言层面<strong>调用</strong>某个方法就可以了。但是在多进程编程中我们就得通过操作系统来通讯了，比如信号量，socket 和 pipeline 等，每台机器可以视为一个进程，我们一般基于 TCP 构建远程调用模块。</p>
+<p>所谓远程调用，目标是像调用自己的方法一样调用另外一机器的方法，它要处理的问题是路由，参数序列化和反序列化，处理通讯故障。下面主要讨论处理通讯故障的集中思路。</p>
+<p>首先我们看看通讯故障是指什么：丢包，网络断线，服务器运行缓慢或者调用宕机的服务器。而且在客户端看来，并不知道是服务器是没有看到自己的请求还是收到了请求但不没有响应，这似乎有点难办。</p>
+<p>要保证调用的可用性，可以采取 <strong>至少调用一次</strong> 模式：第一次调用后，等一会如果没有响应再次发送，重复几次后还是没有响应就给客户端报错。这个模式在远程调用模块部分实现起来比较简单，但是给业务程序增加了复杂度，比如请求 “给账户A充值100元”，由于服务器的响应没有传达到客户端，所以服务器可能会收到多个相同的充值请求，这就需要服务器业务程序保证逻辑的正确性。由此看来这种简单的 “至少调用一次” 模式适合只读和幂等调用。</p>
+<p>为了降低业务编程的心智负担，<strong>最多调用一次</strong> 模式会更好，这就要求远程调用模块识别出相同的请求（用 ID 区分），然后只调用一次函数，用其结果响应这些请求。那么问题来了，如何保证 ID 的唯一性？ClientID+请求序列号是不错方案，但是为了不影响后续的请求，我们需要删掉服务器旧的 ID。下面列了三种可行的删除策略：</p>
+<ol>
+<li><p>每个客户端维护一个请求序列状态数组，每个请求携带数字N，代表 <code>&lt;= N 的请求都已收到响应</code>，所以服务器上 &lt;= N 的 ID 可以安全清除。是不是类似于 TCP 中的序列号和 ACK ?</p>
+</li>
+<li><p>只允许客户端同时处理一个请求，这样服务器接收到新的请求后，旧的请求 ID 就可以删除了。</p>
+</li>
+<li><p>每个请求只允许5分钟的重试时间，服务器5分钟后即可清除请求ID。</p>
+</li>
+</ol>
+<p>服务器可能需要持久化正在处理的请求信息，不然服务器重启后可能会将处理过的函数调用再次处理造成业务逻辑问题。</p>
+<p><strong>确定执行一次</strong> = 最多调用一次 + 无限重试。</p>
+<p>本系列文章还有完善的配套实验，使用简洁好上手的 Go 语言，其中我们会了解 Go 语言标准库 <code>rpc</code> 的设计思路和如何制作兼容 <code>rpc</code> 接口且适用于实验的 <code>labrpc</code>，准备ing，稍后会跟大家分享。</p>
+</div></article></div></main><footer><div class="paginator"><a href="/2016/12/16/分布式系统-3-GFS/" class="prev">上一篇</a><a href="/2016/11/11/分布式系统-1-MapReduce/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

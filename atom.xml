@@ -5,7 +5,7 @@
   <link href="/atom.xml" rel="self"/>
   
   <link href="http://focinfi.wang/"/>
-  <updated>2017-03-18T13:59:42.000Z</updated>
+  <updated>2017-03-18T23:37:58.000Z</updated>
   <id>http://focinfi.wang/</id>
   
   <author>
@@ -14,6 +14,767 @@
   </author>
   
   <generator uri="http://hexo.io/">Hexo</generator>
+  
+  <entry>
+    <title>分布式系统-实验-shardkv</title>
+    <link href="http://focinfi.wang/2017/03/03/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-%E5%AE%9E%E9%AA%8C-shardkv/"/>
+    <id>http://focinfi.wang/2017/03/03/分布式系统-实验-shardkv/</id>
+    <published>2017-03-02T16:00:00.000Z</published>
+    <updated>2017-03-18T23:37:58.000Z</updated>
+    
+    <content type="html"><![CDATA[<h3 id="介绍"><a href="#介绍" class="headerlink" title="介绍"></a>介绍</h3><p> 基于上个实验的成果 kvraft，我们将 kv 分成多个部分(shard)以提高性能。怎么分呢？比如讲以 “a” 开头的 key 分到一个 shard，以 “b” 开头的 key 分到另一个 shard。如此一来，每个 shard 只需要处理与他相关的 key 的操作，其他 shard 于此同时就可以接受其他的请求，系统就可增加 shard 以提高吞吐量。f</p>
+<p>我们的整个系统有两个基本组件：shard master 和 shard group。整个系统有一个 master 和多个 group，master 一个 raft 集群，每一个 shard group 是由 kvraft 实例构成的集群。shard master 负责调度，客户端向 shard master 发送请求，master 会根据配置(config)来告知客户端服务这个 key 的是哪个 group。 每个 group 负责部分 shard。</p>
+<p>对于各个 group，我们需要实现 group 之间的 shard 数据转移。因为我们 group 是动态变化的，有新加入的，也有要退出，有时负载均衡需要重新配置各个 group 的 shard。 </p>
+<p>本次实验最大的挑战是如何处理在服务的过程中修改配置文件，即 group 与 shard 的对应关系。比如说，客户端此时请求的数据恰好是正在迁移的数据，我们需要确认本次请求是在迁移操作之前，还是之后，如果是之前，请求的数据所对应的新 shard 会收到通知；若是之后，请求只需重试。所以我们 Raft 不要把 <code>Put</code>, <code>Appends</code>, <code>Gets</code> 写进 log 中，<code>Reconfiguration</code> 也要写进去。总之，我们要确保每个请求只有一个 group 服务。</p>
+<p>我们的代码主要在 src/shardmastet 和 src/shardkv 中实现。</p>
+<p>Part A: Shard Master</p>
+<p>shardmaster 负责管理所有的 configuration 改动，每个 configuration 记录了所有的 shardgroup 以及 shards 与 group 的对应关系。每当有修改时，master 都会生成一个新的 configuration。</p>
+<p>在 shardmaster/common.go 中，描述了 configuration 的对外接口：Join, Leave, Move 和 Query。</p>
+<ol>
+<li><p>Join 主要是用来增加 group。参数是 GID(Grop ID) 及其对应的 server 列表。master 需要重新分配 group 与 shard 的映射关系，当然数据移动的越少，数据分布的越平均越好，然后创建新的 configuration。</p>
+</li>
+<li><p>Leave 和 Join 相反，用于删除一个 group。参数是 GID。 master 需要重新分配 group 与 shard 的映射关系，当然数据移动的越少，数据分布的越平均越好，然后创建新的 configuration。</p>
+</li>
+<li><p>Move 的参数是 shard 和 GID，用于将 shard 数据移动到 GID 对应的 group 中去。主要用于测试方便。</p>
+</li>
+<li><p>Query 用于获取某个版本的 configuration，参数即为版本号。若参数是 -1 或大于最新的版本号，则返回最新的 configuration，如此时 master 正在执行 Join, Leave 或 Move，则需等操作完成再处理 Query(-1)。</p>
+</li>
+</ol>
+<p>在数值方面，configuration 应该从 0 开始计算，然后自增。shard 的数量应该大于 group 的数量。</p>
+<p>别忘了 Go 的 map 变量是引用。</p>
+<p>Part B: Sharded 键值服务</p>
+<p>有了 master，我们就可以开始构建 shard group 了，代码主要在 shardkv/client.go，shardkv/common.go，and shardkv/server.go。</p>
+<p>我们要实现的 shardkv 其实就是组成一个 group 集群的一个备份服务器。一个 group 集群对外接受 Get，Put 和 Append 请求，但只是部分 shard，例如以 “a” 或 “b” 开头的 key。使用基础代码中的 <code>key2shard()</code> 方法得到 key 与 shard 之间的映射关系。全部的 group 集群会服务所有的 shard。master 负责将分配 shard 与 group 的映射关系，当映射关系发生变化后，集群之间需要转移数据，以确保 client 的操作结果一致性。</p>
+<p>作为一个分布式存储系统，基本的要求对外看起来和单机没啥区别即保证客户端请求的顺序执行。<code>Get()</code> 应该看到最新的结果，所有的操作需要在有 master 配置改动的同时，保持正确性。除此之外，我们还要保证可用性，即当有多数 group 正常运行，彼此能沟通且能和 master 集群通信时，整个系统依然能对外服务和内部配置自动调整。</p>
+<p>一个 shardkv 只属于一个 group，这个关系在本实验中假设不会改变的。</p>
+<p>基础代码中的 client.go 会将 PRC 发送给正确的 group，如果 group 响应说你要的 key 不是我负责的，client 会向 master 请求最新的 configuration，然后确定向那个 group 发送 RPC。我们要做是为每个 RPC 增加 ID，以实现判断重复请求的逻辑，就像上个实验 kvraft 一样。</p>
+<p>写完代码测试一下，通过 Challenge 以前的测试用例。</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div><div class="line">16</div><div class="line">17</div><div class="line">18</div><div class="line">19</div><div class="line">20</div><div class="line">21</div><div class="line">22</div><div class="line">23</div><div class="line">24</div><div class="line">25</div><div class="line">26</div><div class="line">27</div><div class="line">28</div><div class="line">29</div></pre></td><td class="code"><pre><div class="line">$ cd ~/6.824/src/shardkv</div><div class="line">$ go test</div><div class="line">Test: static shards ...</div><div class="line">  ... Passed</div><div class="line">Test: join then leave ...</div><div class="line">  ... Passed</div><div class="line">Test: snapshots, join, and leave ...</div><div class="line">  ... Passed</div><div class="line">Test: servers miss configuration changes...</div><div class="line">  ... Passed</div><div class="line">Test: concurrent puts and configuration changes...</div><div class="line">  ... Passed</div><div class="line">Test: more concurrent puts and configuration changes...</div><div class="line">  ... Passed</div><div class="line">Test: unreliable 1...</div><div class="line">  ... Passed</div><div class="line">Test: unreliable 2...</div><div class="line">  ... Passed</div><div class="line">Test: shard deletion (challenge 1) ...</div><div class="line">  ... Passed</div><div class="line">Test: concurrent configuration change and restart (challenge 1)...</div><div class="line">  ... Passed</div><div class="line">Test: unaffected shard access (challenge 2) ...</div><div class="line">  ... Passed</div><div class="line">Test: partial migration shard access (challenge 2) ...</div><div class="line">  ... Passed</div><div class="line">PASS</div><div class="line">ok  	shardkv	206.132s</div><div class="line">$</div></pre></td></tr></table></figure>
+<p>我们的实现基本不需要主动向 master 发送 Join 请求，这些逻辑都放在基础代码的测试用例中。</p>
+<h4 id="Step-1-从单-group-开始"><a href="#Step-1-从单-group-开始" class="headerlink" title="Step 1 从单 group 开始"></a>Step 1 从单 group 开始</h4><p>第一步我们先假设所有的 shard 都分配到一个 group 上，所以代码实现和 Lab 3 非常类似。只是要在 group 启动时，根据 configuration 确定自己的应该接受那些 key 的请求。完成后能通过第一个测试用例。</p>
+<p>然后我们要处理 configuration 更改时的逻辑。首先每个 group 都要监听 configuration 的改变，当其版本更新后，我们要开始进行 shard 迁移。当某个 shard 不在归该 group 管理时，该 group 应该立刻停止响应与这个 shard 相关的请求，然后开始将这个 shard 的数据迁移到另一个负责管理它的 group 那里。当一个 group 有了一个新的 shard 所有权时，它需要先等待 shard 的数据完全迁移完成后，才能开始接受这个 shard 相关的请求。 </p>
+<p>要注意的是在 shard 数据迁移的过程中，要保证所有一个 group 内所有的副本服务器同时进行数据迁移，然后让整个 group 对并发请求保持结果溢脂性。</p>
+<p>代码中应该定期从 shardmaster 中拉取 configuration 信息。测试用例会测试 100ms 左右时间间隔下，configuration 改变是，逻辑是否依然正确。</p>
+<p>服务器之间需要使用 RPC 的方式进行数据迁移。shardmaster 的 Config 里面有服务器的名字，但是我们的 RPC 需要向 labrpc.ClientEnd 发送信息。没事，在调用 StartServer() 时，传入了一个 make_end() 方法，调用他可以将服务器的名字转化为一个 labrpc.ClientEnd.</p>
+<p>当 group 收到请求的数据不在自己管辖范围内时，应当返回 ErrWrongGroup，但是我们得在 configuration 变化的情况下，做出正确的判断。</p>
+<p>由于我们要能判断出请求的重复性，所以当一个 shard 从一个 group 转移到另一个 group 时，不仅要带有 Key/Value 数据还得带上一些判断重复请求的信息。考虑一下在何种情况下接受新 shard 的 group 需要更新自己状态，完全覆盖本地数据一定就是对的吗？</p>
+<p>接着还得考虑服务器和客户端如何处理 ErrWrongGroup。收到 ErrWrongGroup 响应的客户端需要改变自己的 sequence number 吗？服务器在给 Get/Put 请求恢复 ErrWrongGroup 的时候需要更新本地对这个客户端的状态记录吗？</p>
+<p>其实当 group 对一个 shard 失去了管理权后，没必要立即将其删除，虽然在生产环境下可能会造成空间浪费，但是在我们本次实验中可以简化逻辑。</p>
+<blockquote>
+<p>Hint: When group G1 needs a shard from G2 during a configuration change, does it matter at what point during its processing of log entries G2 sends the shard to G1?<br>You can send an entire map in an RPC request or reply, which may help keep the code for shard transfer simple.</p>
+</blockquote>
+<p>用 RPC 传送 map 的时候记得复制到一个新的 map 里面去哦，传引用就会有问题。</p>
+<p>Challenge exercises</p>
+<p>For this lab, we have two challenge exercises, both of which are fairly complex beasts, but which are also essential if you were to build a system like this for production use.<br>Garbage collection of state</p>
+<p>When a replica group loses ownership of a shard, that replica group should eliminate the keys that it lost from its database. It is wasteful for it to keep values that it no longer owns, and no longer serves requests for. However, this poses some issues for migration. Say we have two groups, G1 and G2, and there is a new configuration C that moves shard S from G1 to G2. If G1 erases all keys in S from its database when it transitions to C, how does G2 get the data for S when it tries to move to C?</p>
+<blockquote>
+<p>CHALLENGE: Modify your solution so that each replica group will only keep old shards for as long as is absolutely necessary. Bear in mind that your solution must continue to work even if all the servers in a replica group like G1 above crash and are then brought back up. You have completed this challenge if you pass TestChallenge1Delete and TestChallenge1Concurrent.</p>
+<p>Hint: gob.Decode will merge into the object that it is given. This means that if you decode, say, a snapshot into a map, any keys that are in the map, but not in the snapshot, will not be deleted.</p>
+</blockquote>
+<p>Client requests during configuration changes</p>
+<p>The simplest way to handle configuration changes is to disallow all client operations until the transition has completed. While conceptually simple, this approach is not feasible in production-level systems; it results in long pauses for all clients whenever machines are brought in or taken out. A better solution would be if the system continued serving shards that are not affected by the ongoing configuration change.</p>
+<blockquote>
+<p>CHALLENGE: Modify your solution so that, if some shard S is not affected by a configuration change from C to C’, client operations to S should continue to succeed while a replica group is still in the process of transitioning to C’. You have completed this challenge when you pass TestChallenge2Unaffected.</p>
+</blockquote>
+<p>While the optimization above is good, we can still do better. Say that some replica group G3, when transitioning to C, needs shard S1 from G1, and shard S2 from G2. We really want G3 to immediately start serving a shard once it has received the necessary state, even if it is still waiting for some other shards. For example, if G1 is down, G3 should still start serving requests for S2 once it receives the appropriate data from G2, despite the transition to C not yet having completed.</p>
+<blockquote>
+<p>CHALLENGE: Modify your solution so that replica groups start serving shards the moment they are able to, even if a configuration is still ongoing. You have completed this challenge when you pass TestChallenge2Partial.</p>
+</blockquote>
+<p>Handin procedure</p>
+<p>Before submitting, please run all the tests one final time. You are responsible for making sure your code works.</p>
+<p>Also, note that your Lab 4 sharded server, Lab 4 shard master, and Lab 3 kvraft must all use the same Raft implementation. We will re-run the Lab 2 and Lab 3 tests as part of grading Lab 4.</p>
+<p>Before submitting, double check that your solution works with:</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div></pre></td><td class="code"><pre><div class="line">$ go test raft/...</div><div class="line">$ go test kvraft/...</div><div class="line">$ go test shardmaster/...</div><div class="line">$ go test shardkv/...</div></pre></td></tr></table></figure>
+<p>Submit your code via the class’s submission website, located at <a href="https://6824.scripts.mit.edu:444/submit/handin.py/" target="_blank" rel="external">https://6824.scripts.mit.edu:444/submit/handin.py/</a>.</p>
+<p>You may use your MIT Certificate or request an API key via email to log in for the first time. Your API key (XXX) is displayed once you logged in, which can be used to upload the lab from the console as follows.</p>
+<p>For part A:</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div></pre></td><td class="code"><pre><div class="line">$ cd &quot;$GOPATH&quot;</div><div class="line">$ echo &quot;XXX&quot; &gt; api.key</div><div class="line">$ make lab4a</div></pre></td></tr></table></figure>
+<p>For part B:</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div></pre></td><td class="code"><pre><div class="line">$ cd &quot;$GOPATH&quot;</div><div class="line">$ echo &quot;XXX&quot; &gt; api.key</div><div class="line">$ make lab4b</div></pre></td></tr></table></figure>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;h3 id=&quot;介绍&quot;&gt;&lt;a href=&quot;#介绍&quot; class=&quot;headerlink&quot; title=&quot;介绍&quot;&gt;&lt;/a&gt;介绍&lt;/h3&gt;&lt;p&gt; 基于上个实验的成果 kvraft，我们将 kv 分成多个部分(shard)以提高性能。怎么分呢？比如讲以 “a” 开头的 key 分到一个
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-实验-Raft</title>
+    <link href="http://focinfi.wang/2017/02/24/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-%E5%AE%9E%E9%AA%8C-Raft/"/>
+    <id>http://focinfi.wang/2017/02/24/分布式系统-实验-Raft/</id>
+    <published>2017-02-23T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<h3 id="介绍"><a href="#介绍" class="headerlink" title="介绍"></a>介绍</h3><p>通过 <a href="http://www.jianshu.com/p/5e1b0ad68bff" target="_blank" rel="external">实验一: MapReduce</a>，我们慢慢熟悉了实验环境和 Go 语言。现在我们要开始构建一个大实验，高性能，分布式 Key/Value 服务。实验分三个阶段，首先我们实现 Raft 协议，接着在 Raft 基础上构建一个 Key/Value 服务，然后将服务分片(shard）化以提高性能，最后给分片间的操作提供事务性保障。</p>
+<p>本次我们先来实现 Raft。在一个用备份提高可用性的系统中，Raft 用于管理备份服务器。在高可用系统中，通过备份，小部分的机器故障不会影响系统的正常工作，但问题是每台机器都有可能发生故障，所以不能保证机器集群上的数据始终是一样的，而 Raft 协议就是帮助我们判断，哪些数据才是正确的，哪些需要抛弃并用正确的数据更新。</p>
+<p>Raft 的底层思路是实现一个备份状态机。Raft 将所有的客户端请求组织成一个序列，称之为 log，不仅如此，在执行 log 之前，Raft 还会保证所有的备份服务器都同意执行本次 log 的内容。每个备份服务器都会按照前后顺序执行 log，让客户端的请求应用到状态机上。由于每台机器都是按相同顺序执行相同请求，所以他们始终保持相同的状态。如果一个服务器失败后重连了，Raft 负责更新它的 log。只要大多数机器保持健康状态并且能相互通讯，Raft 就能让系统正确的持续运行，否则系统将不再接受新的请求，一旦有足够的机器，系统将会从之前状态开始继续进行。</p>
+<p>在本次实验中，我们将用 Go 语言实现 Raft，规模当然比实验一大多了。具体来说就是几个 Raft 实例通过 RPC 的方式通讯已维护各自的 log。Raft 集群应该能接受带有序号的指令或者叫 log 序列。每个 log 都保证可以提交。</p>
+<p>注意：只能通过 RPC 实现 Raft 实例之间的沟通。所以，不同的 Raft 实例之间不能共享变量，也不要用文件。</p>
+<p>本次实验我们先来实现 Raft 论文中前5章的内容，包括保存需持久的状态，因为当一个服务器重连后需要根据这些信息恢复。</p>
+<p>Raft 相关资料：</p>
+<ol>
+<li><a href="https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf" target="_blank" rel="external">论文</a></li>
+<li><a href="http://thesecretlivesofdata.com/raft/" target="_blank" rel="external">动画展示</a></li>
+</ol>
+<p>虽然实现 Raft 协议的代码量不是最大，但是要让它正确的工作并不是一件容易的事情。需要很多边界情况。当测试不通过时，不易想明白是那种场景出了问题，所以不好debug。</p>
+<p>写代码之前要仔细阅读论文，实现基本按照论文的描述，测试也是按照论文设计的。图2是比较完整的伪代码。</p>
+<h3 id="实验环境"><a href="#实验环境" class="headerlink" title="实验环境"></a>实验环境</h3><p>拉取代码</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div></pre></td><td class="code"><pre><div class="line">$ git clone git://g.csail.mit.edu/6.824-golabs-2016 6.824</div><div class="line">$ cd 6.824</div><div class="line">$ ls</div><div class="line">Makefile src</div><div class="line">``` </div><div class="line"></div><div class="line">进入 raft 文件夹，运行测试代码</div></pre></td></tr></table></figure>
+<p>$ cd src/raft<br>$ GOPATH=~/6.824<br>$ export GOPATH<br>$ go test<br>Test: initial election …<br>— FAIL: TestInitialElection (5.03s)<br>    config.go:270: expected one leader, got 0<br>Test: election after network failure …<br>— FAIL: TestReElection (5.03s)<br>    config.go:270: expected one leader, got 0<br>…<br>$<br><figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div></pre></td><td class="code"><pre><div class="line"></div><div class="line">当然没有通过，当你写好后，再次测试，看到下面的输出，表示通过测试：</div><div class="line"></div><div class="line">```shell</div><div class="line">$ go test</div><div class="line">Test: initial election ...</div><div class="line">  ... Passed</div><div class="line">Test: election after network failure ...</div><div class="line">  ... Passed</div><div class="line">...</div><div class="line">PASS</div><div class="line">ok  	raft	162.413s</div></pre></td></tr></table></figure></p>
+<p>协议的实现代码主要放在 <code>raft/raft.go</code> 文件中。这个文件里面已经写好了一些框架代码，一些发送和接受 RPC 的示例，还有一些保存持久化信息的例子。</p>
+<p>下面提供了一些接口，我们的 Raft 需要一一实现，测试代码会以它为测试蓝本。</p>
+<figure class="highlight go"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div></pre></td><td class="code"><pre><div class="line"><span class="comment">// 创建一个新的 Raft 实例</span></div><div class="line">rf := Make(peers, me, persister, applyCh)</div><div class="line"></div><div class="line"><span class="comment">// 处理一个指令</span></div><div class="line">rf.Start(command <span class="keyword">interface</span>&#123;&#125;) (index, term, isleader)</div><div class="line"></div><div class="line"><span class="comment">// ask a Raft for its current term, and whether it thinks it is leader</span></div><div class="line"><span class="comment">// 返回该 Raft 实例的当前 term 和是否是 Leader</span></div><div class="line">rf.GetState() (term, isLeader)</div><div class="line"></div><div class="line"><span class="comment">// 每当有一个请求被执行了，都应当向服务送一个 ApplyMsg</span></div><div class="line"><span class="keyword">type</span> ApplyMsg</div></pre></td></tr></table></figure>
+<p>一个服务调用 <code>Make(peers,me,…)</code> 创建一个 Raft 实例。peers 是<br>已经创立的 RPC 连接数组，互相之间可访问；me 是当前创建的实例在 peers 数组中的索引值。<code>Start(command)</code> 让 Raft 集群尝试将 command 追加到备份复制的log中。<code>Start()</code> 应该马上响应，不需要等待执行结束。服务可通过监听 <code>applyCh</code> 的 <code>ApplyMsg</code> 到达来判断某个 command 已经完成。</p>
+<p>Raft 节点之间使用 <code>labrpc</code> 进行通信。<code>raft.go</code> 里面有选举Leader的RPC示例，发送 <code>sendRequestVote()</code>，处理请求 <code>RequestVote()</code>。 </p>
+<h3 id="Step-I-选举Leader-和-heartbeat"><a href="#Step-I-选举Leader-和-heartbeat" class="headerlink" title="Step I: 选举Leader 和 heartbeat"></a>Step I: 选举Leader 和 heartbeat</h3><p>要求：只能有一个 Raft 被选举成为 leader，并且用 heartbeat(发送空的 AppendEntry) 保持 leader 状态。通过前两个测试。</p>
+<p>提示：</p>
+<ol>
+<li><p>仔细阅读论文中的图二部分，为 Raft struct 添加必要的属性。同时还需要定义一个新的 struct 表示 log。不要忘了公开的属性即开头大写才可以通过 RPC 传递。</p>
+</li>
+<li><p>先实现选举部分，完善 RequestVoteArgs 和 RequestVoteReply。在 Make() 方法里面创建一个 gorutine，如果过了一段时间还没有其他 Raft 给它发消息，说明此时没有 leader，即让自己成为 candidate，发送 RequestVote 竞选 leader，当然对于每个 Raft 来说也要能够处理别人发来的 RequestVote，满足一定的规则时则投他一票。</p>
+</li>
+<li><p>要实现 heartbeat，得先定义 AppendEntries RPC 相关的 struct。然后让 leader 定期给他的小弟(follower) 发送。当然需要实现处理方法，成功处理后需要更新follower选举等候时间，这样 leader 就可通过发 heartbeat 保持它的领导权。</p>
+</li>
+<li><p>每个 Raft 的选举等待周期应有一定的随机性，以防止总是有多个 Raft 同时竞选而无法选出 leader 的情况。</p>
+</li>
+</ol>
+<h3 id="Step-2-接受客户端命令"><a href="#Step-2-接受客户端命令" class="headerlink" title="Step 2: 接受客户端命令"></a>Step 2: 接受客户端命令</h3><p>选出了 leader 然后就可以将这个集群当做一个整体，它能接受指令，并且保证持久性且具备一定容错性。所以我们要让 Start() 方法能够接受指令并把它们放入 log 中。只有 leader 向 log 列表中添加新的内容，follower 的 log 列表通过来自 leader AppendEntries RPC 更新。</p>
+<p>要求：leader 和 follower 的 log 列表更新操作。完善 Start() 方法，完善 AppendEntries，实现 sendAppendEntries 和 handler。通过 “basic persistence” 之前所有的测试。</p>
+<p>提示：</p>
+<ol>
+<li><p>需要考虑各种失败的情况如无法接收到 RPC，宕机后重连等。同时还得实现论文 5.4.1 中描述的竞选阶段的限制。</p>
+</li>
+<li><p>尽管只有 leader 会将新的log追加到 log 列表中，但每个 raft 都需要将 log 应用即执行 log 中的命令。所以尽可能将 log 的操作和应用逻辑解耦。</p>
+</li>
+<li><p>尽量降低 follower 同步 leader 时的沟通次数。</p>
+</li>
+</ol>
+<h3 id="Step-3-持久化数据"><a href="#Step-3-持久化数据" class="headerlink" title="Step 3: 持久化数据"></a>Step 3: 持久化数据</h3><p>一个 Raft 服务器重连后能恢复到宕机时候的状态，所以我们需要持久化一些必要状态信息。可参考论文图二。</p>
+<p>一个生产环境下的 Raft 服务器需要将状态信息持久化到磁盘中，我们实验为了简化，将持久化操作封装到 Persister 中。用 Make() 创建 Raft 实例时需要传入 Persister 参数，用于初始化状态信息，同时在 Raft 实例状态改变时保存下来。相关方法为 ReadRaftState() 和 SaveRaftState().</p>
+<p>要求：</p>
+<p>完善 persist 方法，然后在合适的时机调用，即考虑在 Raft 协议中何种情况下需要持久化状态信息。需能通过 “basic persistence” 测试(go test -run ‘TestPersist1$’)</p>
+<p>注意：</p>
+<ol>
+<li><p>persist() 需要将数据转化成二进制才能存储</p>
+</li>
+<li><p>为了避免 OOM(Out Of Memory)，Raft 会定期清理老的 log，下个实验我们会用 snapshotting(论文的第7章) 解决这个问题。</p>
+</li>
+</ol>
+<p>提示：</p>
+<ol>
+<li>RPC 和 GOB 只会对 struct 的公开属性即首字母大写有效。</li>
+<li>有些严格测试需要实现论文的第7页尾到第8页上部灰线标记的部分，即当 AppendEntries 中的 log 与本 follower 冲突时，给 leader 反馈冲突的 term 和下一个 index。</li>
+</ol>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;h3 id=&quot;介绍&quot;&gt;&lt;a href=&quot;#介绍&quot; class=&quot;headerlink&quot; title=&quot;介绍&quot;&gt;&lt;/a&gt;介绍&lt;/h3&gt;&lt;p&gt;通过 &lt;a href=&quot;http://www.jianshu.com/p/5e1b0ad68bff&quot; target=&quot;_blank&quot; rel
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-实验-MapReduce</title>
+    <link href="http://focinfi.wang/2017/02/17/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-%E5%AE%9E%E9%AA%8C-MapReduce/"/>
+    <id>http://focinfi.wang/2017/02/17/分布式系统-实验-MapReduce/</id>
+    <published>2017-02-16T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<h3 id="介绍"><a href="#介绍" class="headerlink" title="介绍"></a>介绍</h3><p>通过 <a href="http://www.jianshu.com/p/32a41f48dc80" target="_blank" rel="external">分布式系统系列文章</a>，我们了解了分布式的一些基本概念，若是写点代码实践一下，那就更好了。先做个简单的实验练练手，还记得 <a href="http://www.jianshu.com/p/a71258c28ff2" target="_blank" rel="external">MapReduce</a> 吗？，本次实验中会构建一个 MapReduce 库，主要能熟悉 Go 语言外加了解分布式系统中的容错机制。首先写个一个简单的 MapReduce 程序，再写一个 Master，它不仅能分配任务给 worker 而且能处理 worker 执行错误。接口参考论文描述。</p>
+<h3 id="实验环境"><a href="#实验环境" class="headerlink" title="实验环境"></a>实验环境</h3><p>不会让你从零开始撸代码啦，还不快 git clone ?</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div></pre></td><td class="code"><pre><div class="line">$ git clone git://g.csail.mit.edu/6.824-golabs-2016 6.824</div><div class="line">$ cd 6.824</div><div class="line">$ ls</div><div class="line">Makefile src</div></pre></td></tr></table></figure>
+<p>MapReduce 代码支持顺序执行和分布式执行。顺序执行意味着 Map 先执行，当所有 Map 任务都完成了再执行 Reduce，这种模式可能效率比较低，但是比较便于调试，毕竟串行。分布式执行启动了很多 worker 线程，他们并行执行 Map 任务，然后执行 Reduce 任务，这种模式效率更高，当然更难实现和调试。</p>
+<h3 id="准备：熟悉代码"><a href="#准备：熟悉代码" class="headerlink" title="准备：熟悉代码"></a>准备：熟悉代码</h3><p><code>mapreduce</code> 包提供了一个简单的 MapReduce 顺序执行实现。应用只要调用 <code>Distributed()</code> 方法就可以启动一个任务，但是要调试的时候可能需要调用 <code>Sequential()</code>.</p>
+<p>mapreduce 的运行流程如下：</p>
+<ol>
+<li><p>应用层需要提供输入文件，一个 map 函数，一个 reduce 函数，要启动 reduce 任务的数量。</p>
+</li>
+<li><p>用这些参数创建一个 master。它会启动一个 RPC 服务器(master_rpc.go)，然后等待 worker 注册(<code>Register()</code>)。当有待完成的任务时，<code>schedule()</code> 就会将任务分配给 worker，同时也会进行 worker 的错误处理。</p>
+</li>
+<li><p>master 认为每个输入文件应当交给一个 map 任务处理，然后调用 <code>doMap()</code>，无论直接调用 <code>Sequential()</code> 还是通过 RPC 给 worker 发送 DoTask 消息都会触发这个操作。每当调用 doMap() 时，它都会去读取相应的文件，以文件内容调用 map 函数并且为每个输入文件产生 nReduce 个文件。因此，每个 map 任务最终会产生 <code>#files x nReduce</code> 个文件。  </p>
+</li>
+<li><p>master 接下来会对每个 reduce 任务至少调用一次 <code>doReduce()</code>。<code>doReduce()</code> 首先会收集 nReduce 个 map 任务产生的文件，然后在每个文件上执行 reduce 函数，最后产生一个结果文件。</p>
+</li>
+<li><p>master 会调用 <code>mr.merge()</code> 方法将上一步产生所有结果文件聚合到一个文件中。</p>
+</li>
+</ol>
+<p>所以本次实验就是到填空题，空是：doMap, doReduce，schedule 和 reduce。</p>
+<p>其他的方法基本不需要改动，有时间的研究研究有助于理解整体架构。</p>
+<h3 id="Part-I-Map-Reduce-输入和输出"><a href="#Part-I-Map-Reduce-输入和输出" class="headerlink" title="Part I: Map/Reduce 输入和输出"></a>Part I: Map/Reduce 输入和输出</h3><p>第一个空 <code>doMap()</code> 函数的功能是读取指定文件的内容，执行 mapF 函数，将结果保存在新的文件中；而 <code>doReuce()</code> 读取 <code>doMap</code> 的输出文件，执行 reduceF 函数，将结果存在磁盘中。</p>
+<p>写完了就测试测试，测试文件(test_test.go)已经写好了。串行模式测试可执行：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div></pre></td><td class="code"><pre><div class="line">$ cd 6.824</div><div class="line">$ export &quot;GOPATH=$PWD&quot;  </div><div class="line">$ cd &quot;$GOPATH/src/mapreduce&quot;</div><div class="line">$ setup ggo_v1.5</div><div class="line">$ go test -run Sequential mapreduce/...</div><div class="line">ok  	mapreduce	2.694s</div></pre></td></tr></table></figure>
+<p>如果你看到的不是 ok，说明还有 bug 哦。在 common.go 将 debugEnbale 设置成 true，然后运行 <code>go test -run Sequential mapreduce/... -v</code>，可以看到更详细的输出：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div></pre></td><td class="code"><pre><div class="line">$ env &quot;GOPATH=$PWD/../../&quot; go test -v -run Sequential mapreduce/...</div><div class="line">=== RUN   TestSequentialSingle</div><div class="line">master: Starting Map/Reduce task test</div><div class="line">Merge: read mrtmp.test-res-0</div><div class="line">master: Map/Reduce task completed</div><div class="line">--- PASS: TestSequentialSingle (1.34s)</div><div class="line">=== RUN   TestSequentialMany</div><div class="line">master: Starting Map/Reduce task test</div><div class="line">Merge: read mrtmp.test-res-0</div><div class="line">Merge: read mrtmp.test-res-1</div><div class="line">Merge: read mrtmp.test-res-2</div><div class="line">master: Map/Reduce task completed</div><div class="line">--- PASS: TestSequentialMany (1.33s)</div><div class="line">PASS</div><div class="line">ok  	mapreduce	2.672s</div></pre></td></tr></table></figure>
+<h3 id="Part-II-单机词频统计"><a href="#Part-II-单机词频统计" class="headerlink" title="Part II: 单机词频统计"></a>Part II: 单机词频统计</h3><p>完成了第一部分，我们可以开始构建自己第一个 MapReduce 系统：词频统计器。没错还是填空题：mapF 和 reduceF，让 wc.go 可以统计出每个单词出现的次数。我们的测试文件里面只有英文，所以一个单词就是连续出现字母，判断一个字母参考标准库 <code>unicode.IsLetter</code>。</p>
+<p>测试文件是 6.824/src/main/pg-*.txt，不妨先编译试试：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div></pre></td><td class="code"><pre><div class="line">$ cd 6.824</div><div class="line">$ export &quot;GOPATH=$PWD&quot;</div><div class="line">$ cd &quot;$GOPATH/src/main&quot;</div><div class="line">$ go run wc.go master sequential pg-*.txt</div><div class="line"># command-line-arguments</div><div class="line">./wc.go:14: missing return at end of function</div><div class="line">./wc.go:21: missing return at end of function</div></pre></td></tr></table></figure>
+<p>当然通过不了，毕竟空还没填呢。mapF 的参数是测试文件名和其内容，分割成单词，返回 []mapreduce.KeyValue，KeyValue：单词-频次。轮到 reduceF 函数了，它会针对每个 key(单词) 调用一次，参数是某个单词以及这个单词在所有测试文件中的 mapF 结果。</p>
+<p>写好了，便可测试：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div></pre></td><td class="code"><pre><div class="line">$ cd &quot;$GOPATH/src/main&quot;</div><div class="line">$ time go run wc.go master sequential pg-*.txt</div><div class="line">master: Starting Map/Reduce task wcseq</div><div class="line">Merge: read mrtmp.wcseq-res-0</div><div class="line">Merge: read mrtmp.wcseq-res-1</div><div class="line">Merge: read mrtmp.wcseq-res-2</div><div class="line">master: Map/Reduce task completed</div><div class="line">14.59user 3.78system 0:14.81elapsed</div></pre></td></tr></table></figure>
+<p>最终的结果保存在 mrtmp.wcseq 文件中。运行 <code>$ rm mrtmp.*</code> 删除所有的中间数据文件。</p>
+<p>运行 <code>sort -n -k2 mrtmp.wcseq | tail -10</code>，如果看到的和下面的一样，说明你写对了。</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div></pre></td><td class="code"><pre><div class="line">$ </div><div class="line">he: 34077</div><div class="line">was: 37044</div><div class="line">that: 37495</div><div class="line">I: 44502</div><div class="line">in: 46092</div><div class="line">a: 60558</div><div class="line">to: 74357</div><div class="line">of: 79727</div><div class="line">and: 93990</div><div class="line">the: 154024</div></pre></td></tr></table></figure>
+<p>亦可直接运行 <code>$sh ./test-wc.sh</code></p>
+<blockquote>
+<p>小提示: <code>strings.FieldFunc</code> 可以将一个 string 分割成多个部分，<code>strconv</code> 包中有函数可将 string 转换成 int。</p>
+</blockquote>
+<h3 id="Part-III-分布式-MapReduce"><a href="#Part-III-分布式-MapReduce" class="headerlink" title="Part III: 分布式 MapReduce"></a>Part III: 分布式 MapReduce</h3><p>MapReduce 让开发者最爽的地方是不需要关心代码是在多台机器并行执行的。但我们现在的实现是 master 把 map 和 reduce 任务一个一个执行。虽然这种实现模式概念上很简单，但是性能并不是很高。接下来我们来实现一个并发的 MapReduce，它会调用多个 worker 线程去执行任务，这样可以更好地利用多核CPU。当然我们的实验不是真署在多台机器上而是用 channel 去模拟分布式计算。</p>
+<p>由于是并发，所以需要调度者 master 线程，它负责给 worker 分发任务，而且一直等待直到所有 worker 完成任务。为了让我们的实验更加真实，master 只能通过 RPC 的方式与 worker 通讯。worker 代码(mapreduce/worker.go)已经准备好了，它用于启动 worker。</p>
+<p>下一个空是 schedule.go 中的 <code>schedule()</code>，这个方法负责给 worker 分发 map 和 reduce 任务，当所有任务完成后返回。</p>
+<p>master.go 中的 <code>run()</code> 方法会先调用 <code>schedule()</code>，然后调用 <code>merge()</code> 把每个 reduce 任务的输出文件整合到一个文件里面。schedule 只需要告诉 worker 输入文件的名字 (<code>mr.files[task]</code>) 和任务 task，worker 自己知道从哪里读取也知道把结果写到哪个文件里面。master 通过 RPC 调用 <code>Worker.DoTask</code> 通知 worker 开始新任务，同时还会在 RPC 参数中包含一个 <code>DoTaskArgs</code> 对象。</p>
+<p>当一个 worker 准备完毕可以工作时，它会向 master 发送一个 Register RPC，注册的同时还会把这个 worker 的相关信息放入 <code>mr.registerChannel</code>。所以 <code>schedule</code> 应该通过读取这个 channel 处理新 worker 的注册。</p>
+<p>当前正在运行的 job 信息都在 Master 中定义。注意，master 不需要知道 Map 或 Reduce 具体执行的是什么代码；当一个 worker 被 wc.go 创建时就已经携带了 Map 和 Reduce 函数的信息。</p>
+<p>运行 <code>$ go test -run TestBasic mapreduce/...</code> 可进行基础测试。</p>
+<blockquote>
+<p>小提示: master 应该并行的发送 RPC 给 worker，这样 worker 可以并发执行任务。可参考 Go RPC 文档。</p>
+<p>小提示: master 应该等一个 worker 完成当前任务后马上为它分配一个新任务。等待 master 响应的线程可以用 channel 作为同步工具。Concurrency in Go 有详细的 channel 用法。</p>
+<p>小提示: 跟踪 bug 最简单的方法就是在代码加入 debug()，然后执行 <code>go test -run TestBasic mapreduce/... &gt; out</code>，out 就会包含调试信息。最重要的思考你原以为的输出和真正的输出为何不一样。</p>
+</blockquote>
+<p>注：当前的代码试运行在一个 Unix 进程中，而且它能够利用一台机器的多核。如果是要部署在多台机器上，则要修改代码让 worker 通过 TCP 而不是 Unix-domain sockets 通讯。此外还需要一个网络文件系统共享存储。</p>
+<h3 id="Part-IV-处理-worker-执行错误"><a href="#Part-IV-处理-worker-执行错误" class="headerlink" title="Part IV: 处理 worker 执行错误"></a>Part IV: 处理 worker 执行错误</h3><p>本小节要让你的 master 能够处理任务执行失败的 worker。由于 MapReduce 中 worker 并没有持久状态，所以处理起来相对容易。如果一个 worker 执行失败了，master 向 worker 发送的任何一个 RPC 都可能失败，例如超时。因此，如果失败，master 应该把这个任务指派给另为一个worker。</p>
+<p>一个 RPC 失败并不一定代表 worker 失败，有可能是某个 worker 正常运行但 master 无法获取到它的信息。所以可能会出两个 worker 同时执行同一个任务。不过因为每个任务都是幂等的，一个任务被执行两次是没啥影响。</p>
+<p>我们假设它不会失败，所以不需要处理 master 失败的情况。让 master 可以容错是相对困难的，因为它保持着持久的状态，当它失败后我们需要恢复它的状态以保证它可以继续工作。</p>
+<p>test_test.go 还剩最后两个测试。测有一个 worker 失败的情况和有很多 worker 失败的情况。运行可测试：<code>$ go test -run Failure mapreduce/...</code></p>
+<h3 id="Part-V-反向索引（可选）"><a href="#Part-V-反向索引（可选）" class="headerlink" title="Part V: 反向索引（可选）"></a>Part V: 反向索引（可选）</h3><p>挑战性：</p>
+<p>词频统计虽然是 MapReduce 最经典的一个应用，但是在大规模数据应用不经常用。试试写个反向索引应用。</p>
+<p>反向索引在计算机科学中使用广泛，尤其在文档搜索领域中非常有用。一般来说，一个反向索引就是一个从数据到数据特征的映射。例如，在文档搜索中，这个映射可能就是关键词与文档名称的映射。</p>
+<p>main/ii.go 的整体结构跟 wc.go 相似。修改 mapF 和 reduceF 让它们创建反向索引。运行 ii.go 应该输出一个元组列表，每一行的格式如下：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div></pre></td><td class="code"><pre><div class="line">$ go run ii.go master sequential pg-*.txt</div><div class="line">$ head -n5 mrtmp.iiseq</div><div class="line">A: 16 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-metamorphosis.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">ABC: 2 pg-les_miserables.txt,pg-war_and_peace.txt</div><div class="line">ABOUT: 2 pg-moby_dick.txt,pg-tom_sawyer.txt</div><div class="line">ABRAHAM: 1 pg-dracula.txt</div><div class="line">ABSOLUTE: 1 pg-les_miserables.txt</div></pre></td></tr></table></figure>
+<p>你的代码应该通过 test-ii.sh 的测试：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div></pre></td><td class="code"><pre><div class="line">$ sort -k1,1 mrtmp.iiseq | sort -snk2,2 mrtmp.iiseq | grep -v &apos;16&apos; | tail -10</div><div class="line">women: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-metamorphosis.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">won: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-metamorphosis.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">wonderful: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">words: 15 pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-metamorphosis.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">worked: 15 pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-metamorphosis.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">worse: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">wounded: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">yes: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-metamorphosis.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">younger: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div><div class="line">yours: 15 pg-being_ernest.txt,pg-dorian_gray.txt,pg-dracula.txt,pg-emma.txt,pg-frankenstein.txt,pg-great_expectations.txt,pg-grimm.txt,pg-huckleberry_finn.txt,pg-les_miserables.txt,pg-moby_dick.txt,pg-sherlock_holmes.txt,pg-tale_of_two_cities.txt,pg-tom_sawyer.txt,pg-ulysses.txt,pg-war_and_peace.txt</div></pre></td></tr></table></figure>
+<h3 id="通过全部测试"><a href="#通过全部测试" class="headerlink" title="通过全部测试"></a>通过全部测试</h3><p>运行 src/main/test-mr.sh 可测试本次实验的所有内容。如果全部通过，可以看到：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div></pre></td><td class="code"><pre><div class="line">$ sh ./test-mr.sh</div><div class="line">==&gt; Part I</div><div class="line">ok  	mapreduce	3.053s</div><div class="line"></div><div class="line">==&gt; Part II</div><div class="line">Passed test</div><div class="line"></div><div class="line">==&gt; Part III</div><div class="line">ok  	mapreduce	1.851s</div><div class="line"></div><div class="line">==&gt; Part IV</div><div class="line">ok  	mapreduce	10.650s</div><div class="line"></div><div class="line">==&gt; Part V (challenge)</div><div class="line">Passed test</div></pre></td></tr></table></figure>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;h3 id=&quot;介绍&quot;&gt;&lt;a href=&quot;#介绍&quot; class=&quot;headerlink&quot; title=&quot;介绍&quot;&gt;&lt;/a&gt;介绍&lt;/h3&gt;&lt;p&gt;通过 &lt;a href=&quot;http://www.jianshu.com/p/32a41f48dc80&quot; target=&quot;_blank&quot; rel
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-实验-kvraft</title>
+    <link href="http://focinfi.wang/2017/02/10/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-%E5%AE%9E%E9%AA%8C-kvraft/"/>
+    <id>http://focinfi.wang/2017/02/10/分布式系统-实验-kvraft/</id>
+    <published>2017-02-09T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<h3 id="介绍"><a href="#介绍" class="headerlink" title="介绍"></a>介绍</h3><p>这一次我们要在 实验二：Raft 的基础上创建一个可以容错的键值存储服务。具体来说就是用几个 Raft 实例组成一个可以容错的状态机，而不同客户端操作通过 Raft log 保证一致性。同时当有半数以上的 Raft 实例正常运行且能相互通信时，我们的服务就能正确运行。</p>
+<p>在 kvraft 包中，我们要实现 Key/Value 的服务器和客户端，当然服务器同时是一个 Raft 实例。客户端可向服务器发送 Put(), Append() 和 Get() RPC，服务器会将这些命令放到 log 中，然后按顺序执行。客户端可以向任何一个服务器发送请求，但是如果访问的服务器不是 leader 或者没有响应，则需要换一个服务器试试。如果一个客户端指令确定写入 log 中了，则需要给客户端说一声，要是此时服务器宕机或者网络故障了，客户端应该将同样的指令发给另外一个服务器。</p>
+<p>我们的实验分两步来做，第一步我们简单的将每个请求的内容追加到 log 列表中，而不用考虑他的空间占用。第二步，我们将实现论文中第7章的内容，用 snapshot 回收无用的 log。</p>
+<p>虽然这个实验不要写很多代码，但是可能得花很长时间去搞明白你的实现为啥不行。其实比实验二更难 debug，因为有更多的模块是异步的工作方式。</p>
+<p>本实验的代码应在 src/kvraft.go 中实现。需要通过所有测试：</p>
+<figure class="highlight plain"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div></pre></td><td class="code"><pre><div class="line">$ setup ggo_v1.5</div><div class="line">$ cd ~/6.824</div><div class="line">$ git pull</div><div class="line">...</div><div class="line">$ cd src/kvraft</div><div class="line">$ GOPATH=~/6.824</div><div class="line">$ export GOPATH</div><div class="line">$ go test</div><div class="line">...</div><div class="line">$</div></pre></td></tr></table></figure>
+<h3 id="Step-1-初步-Key-Value-实现"><a href="#Step-1-初步-Key-Value-实现" class="headerlink" title="Step 1: 初步 Key/Value 实现"></a>Step 1: 初步 Key/Value 实现</h3><p>首先明确一下我们的服务对外的接口：</p>
+<ol>
+<li><code>Put(key, value)</code>, 为 key 设置新的值 value</li>
+<li><code>Get(key)</code>, 获取 key 的值</li>
+<li><code>Append(key, arg)</code>, 为 key 的值追加 arg</li>
+</ol>
+<p>我们服务由几个 Raft 实例组成一个备份状态集群，客户端应该尝试跟不同的服务器通讯。只要连上了一个 leader，并且此时有半数以上的机器正常运行，则客户端的命令应该被执行。</p>
+<p>当然我们先从最简单的场景实现，即没有机器故障。但是我们得保证服务响应的顺序一致性。即客户端的命令记录在每个 Raft 实例上都按相同的顺序执行，且每个命令最多执行一次。Get(key) 应该读取最新的数据。</p>
+<p>先看看 Op struct 里面还缺少啥属性，然后实现 PutAppend() 和 Get() 的 handler，它们应该调用 Raft 的 Start() 方法将 Op 放入 log 中，然后等待 Raft 向 applyCh 发送数据，以表示刚才的命令执行成功，在此之前不应该再向 Start() 新的指令。收到成功消息后，向客户端反馈。</p>
+<p>完成之后需要能通过 “One client” 测试。</p>
+<p>由于我们发送 Start() 和获得结果是异步的，所以得考虑如何处理先后关系。</p>
+<p>当一个 leader 接收到 Start() 的命令，但是在 commit 之前失去了 leader 身份时，客户端应该寻找新的 leader 重新发送这个命令。当客户端连上的 leader 被网络隔离了，此时这个 leader 还是认为自己是 leader，只是无法让系统执行命令，而且客户端也不知道有新的 leader，这种情况下只能让客户端无限等待。</p>
+<p>最好记住上次的 leader 的 index，这样可以先试试它还是不是 leader，以减少寻找 leader 的时间。</p>
+<p>因为我们假设网络和 Raft 实例都不是始终稳定，所以我们需要处理一个请求发送多次的情况，保证同一请求只处理一次。所以我们需要一些额外数据去标示不同的请求。</p>
+<p>处理同一请求重发的情况： 一个客户端在 term1 向 leader1 发送请求，然后等待响应超时，然后将这个请求发给了 leader2，此时在 term2。客户端的请求应该只被执行一次。完成 Step 1 后，需要能通过 <code>TestPersistPartitionUnreliable()</code> 前面所有测试。</p>
+<p>提到一个请求只能被服务器执行一次，这取决于客户端如何识别不同的请求，可以为每个请求加上标示位，当然也可以规定每个客户端同时只能处理一个请求。</p>
+<h3 id="Step-2-压缩-log-减少冗余"><a href="#Step-2-压缩-log-减少冗余" class="headerlink" title="Step 2: 压缩 log 减少冗余"></a>Step 2: 压缩 log 减少冗余</h3><p>为了让 Raft 的 log 无限制增长，我们要用快照(snapshot，论文第7章)机制可以定期删除无用的 log。</p>
+<p><code>StartKVServer()</code> 传入的参数 <code>maxraftstate</code> 用于表明每个 Raft 实例用于保存 log 的空间大小。每当空间不足时需要生成一个 snapshot，然后告诉 Raft 当前的 log 已经被快照存入磁盘(<code>persister.SaveSnapshot()</code>)了，可以将内存的 log 扔掉了。</p>
+<p>要实现 snapshot 机制，我们需要修改 raft 包的代码，当 follower 需要的同步的 log 已经被快照存入磁盘了，则 leader 需要给 follower 发送一个 <code>InstallSnapshot</code> RPC，follower 接收到这种 RPC 后，需要向 kvraft 发送对应的 snapshot。</p>
+<p>snapshot 需要保存的不仅仅是 log 列表，还需要相关的信息比如请求序列号等。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;h3 id=&quot;介绍&quot;&gt;&lt;a href=&quot;#介绍&quot; class=&quot;headerlink&quot; title=&quot;介绍&quot;&gt;&lt;/a&gt;介绍&lt;/h3&gt;&lt;p&gt;这一次我们要在 实验二：Raft 的基础上创建一个可以容错的键值存储服务。具体来说就是用几个 Raft 实例组成一个可以容错的状态机，而不同
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-10-最终一致性</title>
+    <link href="http://focinfi.wang/2017/02/09/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-10-%E6%9C%80%E7%BB%88%E4%B8%80%E8%87%B4%E6%80%A7/"/>
+    <id>http://focinfi.wang/2017/02/09/分布式系统-10-最终一致性/</id>
+    <published>2017-02-08T16:00:00.000Z</published>
+    <updated>2017-03-18T23:22:42.000Z</updated>
+    
+    <content type="html"><![CDATA[<p>最终一致性的啥意思？重点在于 <strong>最终</strong> 两字，指当对某一资源的修改在一定时间后会同步到所有副本。DNS 就是典型的最终一致性。</p>
+<p>在 DNS 协议中，域名每个解析记录都有 TTL(Time to live) 属性，当我们用浏览器访问网站时，首先查看这个域名在本地的缓存，若最后更新的时间距离现在没有超过 TTL，则直接使用，否则去 DNS server上获取该域名的IP。所以我们在 Name Server 上修改某条记录后，不会立刻扩散(同步)到所有的缓存服务器上，而是由各个层级的服务器根据自己的缓存判断是否过期，若过期才去同步数据。<strong>最终</strong> 的含义就在于此，由此可见如果修改一条 DNS 解析记录，最长可能要等待一个 TTL 周期才能获取最新数据，同样如果你用的 DNS 服务器如果已经有人尝试更新，服务器就不需要再次去 Name Server 更新数据了。这种分布式方式通过层层缓存大大降低了 Name Server 的负载。当然代价是一定时间更新延迟。所以在网络基础设施不发达的时期，DNS 依然能保证域名解析的性能。</p>
+<p>从 DNS 这个应用来看，最终一致性大大提升了访问性能，但是需要业务逻辑处理数据更新延迟。所以如果更新远远少于读写，且能够接受短时的同步延迟是可以采用最终一致性并且做动态的数据更新操作，而不是简单的设个TTL。而对于频繁更新且延迟敏感的需求则不太适合用最终一致性。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;p&gt;最终一致性的啥意思？重点在于 &lt;strong&gt;最终&lt;/strong&gt; 两字，指当对某一资源的修改在一定时间后会同步到所有副本。DNS 就是典型的最终一致性。&lt;/p&gt;
+&lt;p&gt;在 DNS 协议中，域名每个解析记录都有 TTL(Time to live) 属性，当我们用浏览器访问
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-9-释放一致性</title>
+    <link href="http://focinfi.wang/2017/02/03/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-9-%E9%87%8A%E6%94%BE%E4%B8%80%E8%87%B4%E6%80%A7/"/>
+    <id>http://focinfi.wang/2017/02/03/分布式系统-9-释放一致性/</id>
+    <published>2017-02-02T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<blockquote>
+<p>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/keleher-treadmarks.pdf" target="_blank" rel="external">TreadMarks</a></p>
+</blockquote>
+<p>本节我们以 TreadMarks 为模型聊一聊释放一致性的是使用场景。</p>
+<p>所谓释放一致性，是指在对资源操作前，先进行 acquire 操作即获取锁，其实是对某个标示位的值进行读取，若该资源正在被其他进程操作，该标示位为 0，当资源操作完成时会向所有副本发出更新通知，所有副本更新成功后将改标示位改成1，即释放锁(release)，而在此之前，后面的进程只能轮询该标示位以获取锁状态。可见这种一致性模型每次只将修改的部分通知大家更新一下，分散了一致性的压力，数据竞争较小的地方会有比较理想的性能提升。</p>
+<p>但是，每次通知大家更新的时候是需要等所有人都回复OK后才能释放锁。如果 A 修改后不通知 B 和 C，BC 在每次 acquire 之前先把自己的数据更新一下，这样可以将 A 修改同步的负载延迟到各个副本上，这种策略叫 Lazy Release Consistency(LRC)。</p>
+<p>TreadMarks 为分布式共享式内存而设计，采用 LRC 策略保证一致性，比 RC 提高了性能，但需要将资源的操作分成一个个 interval：acquire 和 release 之间，可理解为逻辑上的时钟，称为 vector clock，它维护了各个进程的资源竞争的因果关系，通过合并操作可以得出每个 interval 结束时的资源状态，保证数据的一致性。</p>
+<p>在分布式共享内存中还有一个性能杀手，False Sharing。由于内存的管理单位是页，进程 A 修改的页1的部分1，而进程 B 读取页1的部分2，传统的方式会先把进程B页1副本更新后再进行读取，而进程 A 的修改对进程 B 的读取没有影响，这显然是可以优化的。TreadMarks 的优化策略是在每个 interval 中创建 diff，也就是说，进程 A 写入页1部分1之前先创建页1的复制 twin，然后再去页1中修改，当进程B读取页1时，比较要读的部分在页1和twin有没有区别，若没有则直接读本地页1副本，如有区别则创建创建 diff。根据 vector clock 在时间上因果关系推算出当前进程应该读到那个版本的diff，如此一来，将单一的数据页同步转化成状态的叠加，可以有效降低 False Sharing 的性能损耗，当然需要更多的空间存 diff，用空间换时间。</p>
+<p>没有十全十美的解决方案，只有适合不同场景的平衡取舍，由于分布式内存资源竞争概率远小于非竞争的情况，所以在在竞争同步，创建 diff 的策略上采取 lazy 的方式。反过来说，如果内存竞争的情况高于非竞争的情况，这种处理方式反而会使内存的使用效率降低，比如单机。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;blockquote&gt;
+&lt;p&gt;论文：&lt;a href=&quot;https://pdos.csail.mit.edu/6.824/papers/keleher-treadmarks.pdf&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;TreadMarks&lt;/a&gt;&lt;/p
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-8-FaRM</title>
+    <link href="http://focinfi.wang/2017/01/27/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-8-FaRM/"/>
+    <id>http://focinfi.wang/2017/01/27/分布式系统-8-FaRM/</id>
+    <published>2017-01-26T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<blockquote>
+<p>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/farm-2015.pdf" target="_blank" rel="external">FaRM</a></p>
+</blockquote>
+<p>前面我们聊到对于分布式事务来说，很难同时保证一致性，高并发和可用性(CAP 原则)，核心的原因是资源竞争，这里的资源是指 master 的 CPU，内存和网络，由于要保证一致性就得对资源加锁，但要提高并发性就得减少锁的消耗，而要满足可用性就不得不对数据增加备份，每增加一个备份都会增加了一致性的负担。</p>
+<p>当然我们看整个系统不能只看上层的软件部分，因为我们最终的目的是让硬件处理我们的数据，而软件是对硬件一层一层的封装。所以上面所述的问题是当前计算机硬件基础设施所决定的。</p>
+<p>今天我们我讲的 FaRM(fast remote memory) 目标是挑战 CAP 原则，主要是针对新一代基础设施提出的设计方案。什么新新硬件？Non-Volatile DRAM 和 RMDA。</p>
+<p>RMDA (Remote Memory Direct Access)，简单的说就是在 MDA 的基础上实现机器和机器之间的远程数据传输，而数据的读取复制都不需要 CPU 参与。</p>
+<p>Non-Volatile DRAM，可以理解为 SSD (固态硬盘)</p>
+<p>两个技术带来的好处是解放了 CPU 的 IO 负载。然后我们的真个事务处理流程变成四阶段提交：</p>
+<ol>
+<li>Lock：某个集群的 Primary 接受 client 请求，加锁，处理本地数据，更新版本号。</li>
+<li>Validation：FaRM 通过 RDMA 方式读写所有涉及到的数据版本号，判断失误是否冲突，此过程不需要服务器的 CPU 参与。</li>
+<li>Backup commit：备份服务器写入本次事务的操作 log，不需要 CPU 参与。</li>
+<li>Primary commit：以 RDMA 的方式向 Primary 写入 commit-primary 数据，Primary 的监听程序会释放锁。</li>
+</ol>
+<p>正所谓有得必有失，由于 IO 不经过 CPU，导致某些情况下 CPU 失去了对数据的控制，比如不能确定本次事务是否有足够的存储空间，所以需要在准备阶段需要预约足够的空间。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;blockquote&gt;
+&lt;p&gt;论文：&lt;a href=&quot;https://pdos.csail.mit.edu/6.824/papers/farm-2015.pdf&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;FaRM&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-7-乐观并发控制</title>
+    <link href="http://focinfi.wang/2017/01/20/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-7-%E4%B9%90%E8%A7%82%E5%B9%B6%E5%8F%91%E6%8E%A7%E5%88%B6/"/>
+    <id>http://focinfi.wang/2017/01/20/分布式系统-7-乐观并发控制/</id>
+    <published>2017-01-19T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<blockquote>
+<p>上节准备知识：<a href="http://www.jianshu.com/p/14abaa48ede6" target="_blank" rel="external">两阶段提交</a><br>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/thor95.pdf" target="_blank" rel="external">Thor</a></p>
+</blockquote>
+<p>两阶段提交是广义的协调集群数据一致性。如果要求各个集群强一致性保障，会因为大量使用锁付出性能代价。假如现在我们的各个集群的各自业务很少交集，冲突比较少，而这意味着我们可以不在<strong>协调者</strong>中使用锁，例如分布式对象存储，可以根据不同对象名称区间范围各司其职。为了提高上面这种应用场景的并发效率，有了 OOC(Optimistic Concurrency Control) 乐观并发控制。</p>
+<p>相对于悲观算法用锁串行化执行事务，乐观算法在只有当冲突发生的时候才采取措施。</p>
+<p>对应两阶段提交，准备阶段：多个 client 预执行事务同时向 server 发送验证请求；提交阶段：server 会通知各个 client 各个事务是否会破坏一致性，若可以执行，则各 client 进行 commit，若干不可执行，则各自回滚。</p>
+<p>有意思的是在整个系统对外服务时，所有的数据操作都先在 client 进行，若没有冲突则将修改在 server 更新数据，同时给 client 返回最新数据。这样一来是不需要再 server 对全局资源加锁，而且可以将负载分散到各个集群。当然这么做也是有很大的代价：事务之间的冲突会比传统的方式消耗更多的性能。</p>
+<p>这种方式可以很好地提高 server 的性能，但是要注意选择合适使用场景，扬长避短，合理的分配各个集群的业务分配，尽量做到各自独立。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;blockquote&gt;
+&lt;p&gt;上节准备知识：&lt;a href=&quot;http://www.jianshu.com/p/14abaa48ede6&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;两阶段提交&lt;/a&gt;&lt;br&gt;论文：&lt;a href=&quot;https://pdos.
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-6-两阶段提交</title>
+    <link href="http://focinfi.wang/2017/01/13/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-6-%E4%B8%A4%E9%98%B6%E6%AE%B5%E6%8F%90%E4%BA%A4/"/>
+    <id>http://focinfi.wang/2017/01/13/分布式系统-6-两阶段提交/</id>
+    <published>2017-01-12T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<blockquote>
+<p>上节知识准备：<a href="http://www.jianshu.com/p/300c8bf88597" target="_blank" rel="external">Raft</a></p>
+</blockquote>
+<p>前面我们聊到单个集群的一致性算法，今天我们来聊聊多集群分布式事务算法：两阶段提交。这个算法主要保证了事务的原子性，即各个集群的操作要全做，要么全不做。</p>
+<p>可将多个集群视为参与者，引入第三方协调者，由协调者收集各个参与者对某个操作的预执行情况，然后决定要通知各个参与者 commit 还是 rollback。</p>
+<p>所以所谓的两阶段是指准备阶段和执行阶段，举个例子，首先A将成为该活动的协调者，B、C和D将成为该活动的参与者。准备阶段：A发邮件给B、C和，提出下周三去爬山，问是否同意。那么此时A需要等待B、C和D的回复。B、C和D分别查看自己的日程安排表。B、C发现自己在当日没有活动安排，则发邮件告诉A他们同意下周三去爬长城。由于某种原因，D白天没有查看邮件。那么此时A、B和C均需要等待。到晚上的时候，D发现了A的邮件，然后查看日程安排，发现下周三当天已经有别的安排，那么D回复A说活动取消吧。此时A收到了所有活动参与者的邮件，并且A发现D下周三不能去爬山。那么A将发邮件通知B、C和D，下周三爬长城活动取消。此时B、C回复A“太可惜了”，D回复A“不好意思”。至此该事务终止。</p>
+<p>但是这其中要面临的故障有：</p>
+<ol>
+<li><p>事务参与者发生故障。给每个事务设置一个超时时间，如果某个事务参与者一直不响应，到达超时时间后整个事务失败。   </p>
+</li>
+<li><p>协调者发生故障。协调者需要将事务相关信息记录到操作日志并同步到备用协调者，假如协调者发生故障，备用协调者可以接替它完成后续的工作。如果没有备用协调者，协调者又发生了永久性故障，事务参与者将无法完成事务而一直等待下去。</p>
+</li>
+</ol>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;blockquote&gt;
+&lt;p&gt;上节知识准备：&lt;a href=&quot;http://www.jianshu.com/p/300c8bf88597&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;Raft&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;前面我们聊到单个
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-5-Zookeeper</title>
+    <link href="http://focinfi.wang/2017/01/06/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-5-Zookeeper/"/>
+    <id>http://focinfi.wang/2017/01/06/分布式系统-5-Zookeeper/</id>
+    <published>2017-01-05T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<blockquote>
+<p>上节知识准备：<a href="http://www.jianshu.com/p/300c8bf88597" target="_blank" rel="external">Raft</a><br>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/zookeeper.pdf" target="_blank" rel="external">Zookeeper</a></p>
+</blockquote>
+<p>前面聊了如何使用一致性算法保证集群的可用性，接下来我们聊聊基于这类算法构建的基础服务案例：Zookeeper。</p>
+<p>之前我们聊到<strong>复制状态机</strong>，相同序列 log 可让机器到达相同结果状态。类似于 Raft 这种一致性算法只是保证了多台机器的可用性，并没有规定 log 的内容，类似于计算机网络分层模型，传输层保证了数据的可好传输，而我们在此之上构建何种应用则属于应用层的事情。</p>
+<p>Zookeeper 可以看做提供了一个分布式且保证了操作一致性的文件系统，其设计目标不是像 GFS 一样管理大量大文件，而是以文件系统的目录和文件作为基本数据结构，提供一系列 API，方便用户构建自己的分布式服务。</p>
+<p>相对于普通的目录，Zookeeper 提供四种类型：</p>
+<ol>
+<li><p>PERSISTENT：持久化目录节点，这个目录节点存储的数据不会丢失；</p>
+</li>
+<li><p>PERSISTENT_SEQUENTIAL：顺序自动编号的目录节点，这种目录节点会根据当前已经存在的节点数自动加 1，然后返回给客户端已经成功创建的目录节点名；</p>
+</li>
+<li><p>EPHEMERAL：临时目录节点，一旦创建这个节点的客户端与服务器端连接超时，这种节点会被自动删除；</p>
+</li>
+<li><p>EPHEMERAL_SEQUENTIAL：临时自动编号节点。</p>
+</li>
+</ol>
+<p>这些特性显然是为方便分布式系统开发而设计的，比如 <code>SEQUENTIAL</code> 将 select 和 自增 合二为一个原子操作；<code>EPHEMERAL</code> 则用目录的存在与否代表创建改目录的机器的连接状态。</p>
+<p>举个例子，全局锁。</p>
+<p>首先在在创建 /Lock/ 创建一个 <code>EPHEMERAL_SEQUENTIAL</code> 类型的目录，会得到新创建的目录序列号 Index，然后在查看 /Lock/ 下面最小的目录序列号是不是 Index，若是则代表获得锁，操作结束后，删除 Index 目录，即可释放锁。若有比 Index 小的目录，则监听这些目录的变化，直到 Index 是做小的目录。</p>
+<p>本文旨在为分布式系统知识架构中以 Zookeeper 为例解释复制一致性模型的应用，没有面面俱到，深入了解可参考论文，其详细描述了这个系统的目标，设计思路，实践经验，性能分析。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;blockquote&gt;
+&lt;p&gt;上节知识准备：&lt;a href=&quot;http://www.jianshu.com/p/300c8bf88597&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;Raft&lt;/a&gt;&lt;br&gt;论文：&lt;a href=&quot;https://pdos.c
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-4-Raft</title>
+    <link href="http://focinfi.wang/2016/12/30/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-4-Raft/"/>
+    <id>http://focinfi.wang/2016/12/30/分布式系统-4-Raft/</id>
+    <published>2016-12-29T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<blockquote>
+<p>上节知识准备：<a href="http://www.jianshu.com/p/b4fc9b933d20" target="_blank" rel="external">主从复制</a><br>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf" target="_blank" rel="external">Raft-extended</a></p>
+</blockquote>
+<p>前面聊到主从复制提高可用性，但是简单的主从复制需要解决的 “裂脑问题”：由于各种原因导致集群分成几个小集群，每个小集群都以为别的机器无法服务了，各自为主，无法提供正常的服务。解决办法也很简单，就是在一个主从集合中保证同时只有一个 Master 响应客户端的请求。面我们来聊聊一致性算法：Raft。</p>
+<p>在 90 年代出现 Paxos 一致性算法后，所有的一致性算法的发展和实践都是以此为基础，事实上 Paxos 相当难理解，它本质上时提出了一系列思路，需要工程师根据自己需求进行取舍来实现合适的一致性模型。而 Raft 的首要设计目标是保证一致性逻辑正确性的基础上，尽可能容易理解。</p>
+<p>首先我们得明白作为一个复制状态机集群保障一致性的算法，需要解决什么问题：</p>
+<ol>
+<li>没有 Master 时需要选举出下一个 Master，且要保证同时只有一个 Master</li>
+<li>机器重连后的 log（状态机命令序列） 同步</li>
+</ol>
+<p>在 Raft 中，一个集群的每个机器可能是 Leader，Follower 和 Candidate 三种之一的角色。Leader 负责跟客户端交互，Follower 负责接收 Leader 操作备份命令，而 Candidate 在集群中没有 Leader 时，准备竞选的角色。</p>
+<p>每台机在不同的条件下在三种角色中切换来保证系统的一致性，那具体的是如何解决上面说的三个问题的？</p>
+<p>问题一方案：</p>
+<ol>
+<li><p>集群的数量(sum) 必须是大于 1 的奇数。</p>
+</li>
+<li><p>每个机器都启动一个定时器，当一定时间内没有收到来自 Leader 的消息，则视为 Leader 已不可用，从 Follower 转换成 Candidate，准备选举 Leader。</p>
+</li>
+<li><p>选举过程中，每个机器只可选一个 Candidate，而且必须得到大于 sum/2 个投票才可当选为 Leader。</p>
+</li>
+<li><p>当同时有两个 Candidate 竞选 Leader 时，有可能每个 Candidate 都拿不到多数选票，因为选举也有 timeout，而且是一定范围的随机，所以只要出现多个 Candidate，就简单的重置定时器而已。性能不一定最高，但简单且健壮。</p>
+</li>
+</ol>
+<p>问题二方案：</p>
+<ol>
+<li><p>对于一个集群来说，每次从无 Leader 到进行选举是一个阶段(Term)，所以在旧阶段失联的机器重连后，判断当前集群所在的阶段，若已落后，则无条件用 Leader 的 log 覆盖自己的，成为一个 Follower。</p>
+</li>
+<li><p>所以在 Raft 中，只有 Leader 向 Follower 发送 log，这简化了复制过程，但在某些条件下，系统的复制性能会下降。</p>
+</li>
+<li><p>对于每个客户端请求，只有在超过半数机器复制成功(log 写入成功)时，才能向客户端响应成功。</p>
+</li>
+<li><p>同样在选举时，log 数量多的 Candidate 拥有更高的权重。</p>
+</li>
+</ol>
+<p>论文中详细讨论了 Raft 的 log 复制机制，如何保证各种条件下系统的安全性，动态更换一个集群的机器配置，log 压缩以及性能评估。</p>
+<p>我们还准备一个循序渐进，文档丰富，环境友好的用 Raft 算法实现分布式 KV 数据库实验项目，<a href="http://www.jianshu.com/p/fcda437e560a" target="_blank" rel="external">实验二 Raft算法实现</a>。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;blockquote&gt;
+&lt;p&gt;上节知识准备：&lt;a href=&quot;http://www.jianshu.com/p/b4fc9b933d20&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;主从复制&lt;/a&gt;&lt;br&gt;论文：&lt;a href=&quot;https://pdos.c
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-3-主从复制</title>
+    <link href="http://focinfi.wang/2016/12/23/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-3-%E4%B8%BB%E4%BB%8E%E5%A4%8D%E5%88%B6/"/>
+    <id>http://focinfi.wang/2016/12/23/分布式系统-3-主从复制/</id>
+    <published>2016-12-22T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<p>上篇我们谈到 <a href="http://www.jianshu.com/p/dd703a48f2f6" target="_blank" rel="external">GFS</a>，其中 Chunk Server 采用主从复制容错，可见将一份数据放入多台机器上，当主服务器不可用时，备份服务可以让系统继续对外服务，以此来提高系统的整体可用性。主从之间的复制的内容通常有两种方式：</p>
+<ol>
+<li><p>主服务器执行操作，将最终的结果状态发送给备份服务器，逻辑上很简单，但是可能会需要占用大量带宽。</p>
+</li>
+<li><p>主服务器接受操作指令，从服务器复制相同序列的操作指令，只要保证主从机器的指令结果一致，那么执行相同序列的指令，也可达到备份主服务器状态的目的。</p>
+</li>
+</ol>
+<p>复制状态机，可以把集群里的每台机器当做一台状态机，每台机器的初始状态一致，若接受相同的命令，最终的状态改变都是相同的。举个例子，集群的有三台机器，每台机器上都维护一个键值对数据库服务，而无论用何种方式实现，只要执行 <code>Put(&quot;name&quot;, &quot;Frank&quot;)</code>，每台机器上都会将键为 “name” 的值设为 “Frank”。</p>
+<p>所以我们需要在每个机器都需要遵循一定的协议，规范化命令对状态的影响。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;p&gt;上篇我们谈到 &lt;a href=&quot;http://www.jianshu.com/p/dd703a48f2f6&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;GFS&lt;/a&gt;，其中 Chunk Server 采用主从复制容错，可见将一份数据放入多台机器上，当主服
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-3-GFS</title>
+    <link href="http://focinfi.wang/2016/12/16/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-3-GFS/"/>
+    <id>http://focinfi.wang/2016/12/16/分布式系统-3-GFS/</id>
+    <published>2016-12-15T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<p>在前面的 <a href="http://www.jianshu.com/p/a71258c28ff2" target="_blank" rel="external">MapReduce</a> 中我们聊到这个至简的模型为我们构建分布式系统开启了新的大门，今天我们来聊聊 MapReduce 中负责输入输出的文件系统案例。</p>
+<p>首先我们来了解一下 GFS 的设计目标：在成千上百台 Linux 普通机器存储巨量数据，保证高并发。</p>
+<p>前几篇一直提一致性，啥是一致性？举个例子，我在支付宝上存了 100后，在全国无论什么地方连上哪台支付宝的服务器，我的账户上都得增加 100。如果支付宝全国只有一万个人在用，一台机器一个数据库就足够了，但用户的数量是数以亿计，所以肯定是好多机器在服务，所以如果保证不了一致性，是一秒钟都干不下去的。</p>
+<p>但话又说回来，不是每家企业都是像支付宝一样一分钱都不能错，比如微博，你关注的明星发了一个动态，1分钟后你才刷新到，其实也是可以接受，所以根据不同业务对一致性的要求不同，可分为强一致性和弱一致性。</p>
+<p>我们以文件系统举例，弱一致性的文件读取操作 <code>read()</code> 可能会读不到最新写入的数据；而强一致性保证 <code>read()</code> 始终读到最新写入的数据。不同的场景有不同的一致性策略，那么理想状态下的一致性模型是怎样的？</p>
+<ol>
+<li>文件副本可以像没有副本的文件系统一样使用：像多个客户端访问一台机器上某个磁盘上的文件。</li>
+<li>如果一个应用正在写入，之后的读取操作应该读到写入的内容。</li>
+<li>两个应用并发写入同一个文件。如果该文件不存在，最后文件中可能会有混合的内容。</li>
+<li>如果两个应用并发写入同一个目录，第一个先写，另一个后写。</li>
+</ol>
+<p>理想的拦路虎是什么：机器故障，网络隔离，要一致性又要高并发。然后会发现自相矛盾的<strong>理想</strong>是不可能实现的。所以 GFS 在现实和理想中间找到一个平衡点。看看现实是什么：</p>
+<ol>
+<li>大部分文件都很大，GB 级别</li>
+<li>文件不用删除</li>
+<li>文件的修改只有追加操作</li>
+<li>偶尔读不到最新数据也可以接受，毕竟浏览网页不是查看账户余额</li>
+<li>最重要的是，数据量巨大，并发量大，性能要求很高</li>
+</ol>
+<p>在 GFS 架构中有 Client，Master Server 和 Chunk Server 三种角色，文件被分为固定大小的数据块，在 Chunk 上使用多(默认 3)台机器进行主从备份提高可用性，而 Master 主要管理元数据和 Chunk。对于 Master 操作如修改目录是强一致性的，而对于 Chunk 是弱一致性。</p>
+<p>有道是解决主要矛盾，忽略次要矛盾。既然要提高并发量和可用性，我们认为每个文件追加操作在所有副本执行成功就算本次客户端操作成功，而对于一条数据重复添加，两条追加记录中插入其他数据都视为正常，这大大提高了并发，但要求业务代码区别每个记录的唯一性。这里并发性和可用性是主要矛盾，而一致性则是次要矛盾。</p>
+<p>GFS 对 Master Server 和 Chunk Server 合理分配了各自的负载重点，让 Master 保持轻量和简单的一致性模型；而 Chunk Server 负责实际的文件数据与 Linux 的交互以及主副本与其他备份的复制优化。</p>
+<p>容错方面，Master 采用传统的 Write Ahead Log 和 CheckPoint 机制外几台热备份 Master。而 Chunk Server 采用主从备份，一致性要求不高。</p>
+<p>学习一个系统，场景很重要哦。GFS 为大规模读写，追加，吞吐量巨大，一致性要求不高的需求设计。所以不适合大量小文件，多客户端对同一文件随机修改，master 逻辑复杂且容易出错的场景。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;p&gt;在前面的 &lt;a href=&quot;http://www.jianshu.com/p/a71258c28ff2&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;MapReduce&lt;/a&gt; 中我们聊到这个至简的模型为我们构建分布式系统开启了新的大门，今天我们来聊聊 M
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-2-RPC</title>
+    <link href="http://focinfi.wang/2016/12/09/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-2-RPC/"/>
+    <id>http://focinfi.wang/2016/12/09/分布式系统-2-RPC/</id>
+    <published>2016-12-08T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<p>在开篇 <a href="http://www.jianshu.com/p/32a41f48dc80" target="_blank" rel="external">分布式系统-0-知识架构</a> 我们介绍了分布式系统的背景和需要解决的问题。其中提到分布式设计主要涉及通讯、容错和性能三个方面，今天我们来聊一聊通讯。</p>
+<p>我们先来看看单机的多线程编程，由于在一个进程中大家用的都是同一个代码段，所以只需要在编程语言层面<strong>调用</strong>某个方法就可以了。但是在多进程编程中我们就得通过操作系统来通讯了，比如信号量，socket 和 pipeline 等，每台机器可以视为一个进程，我们一般基于 TCP 构建远程调用模块。</p>
+<p>所谓远程调用，目标是像调用自己的方法一样调用另外一机器的方法，它要处理的问题是路由，参数序列化和反序列化，处理通讯故障。下面主要讨论处理通讯故障的集中思路。</p>
+<p>首先我们看看通讯故障是指什么：丢包，网络断线，服务器运行缓慢或者调用宕机的服务器。而且在客户端看来，并不知道是服务器是没有看到自己的请求还是收到了请求但不没有响应，这似乎有点难办。</p>
+<p>要保证调用的可用性，可以采取 <strong>至少调用一次</strong> 模式：第一次调用后，等一会如果没有响应再次发送，重复几次后还是没有响应就给客户端报错。这个模式在远程调用模块部分实现起来比较简单，但是给业务程序增加了复杂度，比如请求 “给账户A充值100元”，由于服务器的响应没有传达到客户端，所以服务器可能会收到多个相同的充值请求，这就需要服务器业务程序保证逻辑的正确性。由此看来这种简单的 “至少调用一次” 模式适合只读和幂等调用。</p>
+<p>为了降低业务编程的心智负担，<strong>最多调用一次</strong> 模式会更好，这就要求远程调用模块识别出相同的请求（用 ID 区分），然后只调用一次函数，用其结果响应这些请求。那么问题来了，如何保证 ID 的唯一性？ClientID+请求序列号是不错方案，但是为了不影响后续的请求，我们需要删掉服务器旧的 ID。下面列了三种可行的删除策略：</p>
+<ol>
+<li><p>每个客户端维护一个请求序列状态数组，每个请求携带数字N，代表 <code>&lt;= N 的请求都已收到响应</code>，所以服务器上 &lt;= N 的 ID 可以安全清除。是不是类似于 TCP 中的序列号和 ACK ?</p>
+</li>
+<li><p>只允许客户端同时处理一个请求，这样服务器接收到新的请求后，旧的请求 ID 就可以删除了。</p>
+</li>
+<li><p>每个请求只允许5分钟的重试时间，服务器5分钟后即可清除请求ID。</p>
+</li>
+</ol>
+<p>服务器可能需要持久化正在处理的请求信息，不然服务器重启后可能会将处理过的函数调用再次处理造成业务逻辑问题。</p>
+<p><strong>确定执行一次</strong> = 最多调用一次 + 无限重试。</p>
+<p>本系列文章还有完善的配套实验，使用简洁好上手的 Go 语言，其中我们会了解 Go 语言标准库 <code>rpc</code> 的设计思路和如何制作兼容 <code>rpc</code> 接口且适用于实验的 <code>labrpc</code>，准备ing，稍后会跟大家分享。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;p&gt;在开篇 &lt;a href=&quot;http://www.jianshu.com/p/32a41f48dc80&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;分布式系统-0-知识架构&lt;/a&gt; 我们介绍了分布式系统的背景和需要解决的问题。其中提到分布式设计主要涉及通讯
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-1-MapReduce</title>
+    <link href="http://focinfi.wang/2016/11/11/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-1-MapReduce/"/>
+    <id>http://focinfi.wang/2016/11/11/分布式系统-1-MapReduce/</id>
+    <published>2016-11-10T16:00:00.000Z</published>
+    <updated>2017-03-18T23:19:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<p>在开篇 <a href="http://www.jianshu.com/p/32a41f48dc80" target="_blank" rel="external">分布式系统-0-知识架构</a> 我们介绍了分布式系统的背景和需要解决的问题。从本篇开始就要正式开始介绍分布式了。</p>
+<p>在 MapReduce 这篇论文中，举了一个词频统计的例子，就是给你一段英文，返回文中出现的每个单词及其数目。巧豆一麻袋，这个不是我们刚学编程时的练习题目吗？要是用 ruby、python 的话，一行代码就够了呀，大名鼎鼎的 MapReduce 只能干这事啊，我不想学了，太菜。但思考一下如果是 TB 级别的数据，50台机器，一行代码当然也是可以的，但是，只能用一台机计算，并且要负责机器间的数据复制还得处理部分机器失败后计算结果的完整性。可见一行代码显然是不行的。而 MapReduce 就是 Google 处理大量网页数据中总结出来的多机并发算法。</p>
+<p>我们开篇中提到分布式要在保证一致性的基础上尽量提高并发最好还能让业务程序省心。在 MapReduce 中 Map 和 Reduce 从算法层面限制了每个任务的唯一性，任务执行是幂等的，所以 master 处理 worker 失败的方式就是将失败的任务给另一个空闲的 worker 去做。master 默认是不会 crash 的，当然这不可能，master 容错会接下来的文章中介绍。</p>
+<p>所以你看，鱼和熊掌不可兼得，想简化一致性问题，付出的代价就是限制任务的类型。但是这种实践中总结的经验对后来分布式系统影响深远，为何 MapReduce 经得起考验？因为简单到更接近真理。</p>
+<p>想实践一下 MapReduce？我们还准备了一个<a href="http://www.jianshu.com/p/5e1b0ad68bff" target="_blank" rel="external">实验项目</a>，欢迎来战。</p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;p&gt;在开篇 &lt;a href=&quot;http://www.jianshu.com/p/32a41f48dc80&quot; target=&quot;_blank&quot; rel=&quot;external&quot;&gt;分布式系统-0-知识架构&lt;/a&gt; 我们介绍了分布式系统的背景和需要解决的问题。从本篇开始就要正式开始介绍分布
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
+  
+  <entry>
+    <title>分布式系统-0-知识架构</title>
+    <link href="http://focinfi.wang/2016/11/04/%E5%88%86%E5%B8%83%E5%BC%8F%E7%B3%BB%E7%BB%9F-0-%E7%9F%A5%E8%AF%86%E6%9E%B6%E6%9E%84/"/>
+    <id>http://focinfi.wang/2016/11/04/分布式系统-0-知识架构/</id>
+    <published>2016-11-03T16:00:00.000Z</published>
+    <updated>2017-03-19T00:05:40.000Z</updated>
+    
+    <content type="html"><![CDATA[<p>分布式系统的分布式是指多台机器组成一个整体，具备存储和计算能力，理想情况下一个分布式系统可以像单机一样使用，只需要增加机器就可以提升整体性能。</p>
+<p>巧豆一麻袋，为什么费那么大劲组合一堆机器而不是用配置更好的单机？是的，在大数据到来之前，很多公司就是靠做高配机器大赚政府和大企业的钱。但是像谷歌脸书等互联网企业诞生后，他们的数据以指数级速度增长，所以他们根本负担不起高配机器的费用，与此同时，要存数据也不再单纯的 SQL 数据，而是像网页，图片等非结构化数据。在这些需求下，谷歌在实践中总结了三篇影响深远的论文（MapReduce/GFS/Big Table），然后之后的分布式系统基本是在实现和扩展论文的内容。这里多说一句，为什么是谷歌？因为他们首先遇到问题，为了生存下去，不得不开展新的技术，可以想象03年他们文件系统集群存储的设计目标就是 100TB 级别了。</p>
+<p>所以，分布式系统就是管理很多廉价机器，通过复制备份保证在一些机器宕机或者网络故障时，整个系统还能正确的继续提供服务，而且失联的机器恢复后，可以再次融入系统中，机器的数量正比于系统性能。</p>
+<p>所以面对不稳定的网络环境，错综复杂的机器状态，在少数机器不可用时，保证其他机器还能正确服务，同时还要尽可能提高并发，可以想象其复杂程度。所以理解好不同场景下的分布式模型，其他模型都比较容易了，毕竟打了大Boss，小怪都很轻松。</p>
+<p>老实讲，搞分布式真的是人类自虐的游戏。但为了<strong>增加辣鸡机器就能提升性能</strong>的伟大目标，让我们来研究一波吧。</p>
+<p>巧豆一麻袋，相对于提升单机配置的纵向扩展，增加机器的横向扩展又啥特点？</p>
+<p>简单的说横向扩展带来的问题是业务逻辑的程序要处理分布式系统中的复杂度，所以业务代码需要考虑的系统复杂度越多，开发效率就会越慢，出错的可能性就会越大。</p>
+<p>MIT 6.428 课程系统介绍了当今分布式系统的不同场景下的实践方案，课程资料是论文和教授上课使用的教案，没有视频，所以学习起来门槛较高。所以如果有研究精神可以直接看论文，或者直接去上课。</p>
+<p>本系列文章旨在为大家建立分布式系统知识体系架构，用案例丰富架构，而且每个案例都都相对独立以便于深入学习。</p>
+<p>好了，我们来了解一下整个分布式系统的核心目标：对应用程序隐藏分布式系统的复杂度。主要设计三个大的方面：存储，通讯和计算。</p>
+<p>wait，这不是和操作系统管理进程所处理的内存，进程间通信，CPU一样？Good question，经得起考验的模型更接近于真理。没错，在分布式系统中，每台机器可以简单地理解为一个 worker，即单机的一个进程。</p>
+<p>我们将面临三大问题：</p>
+<ol>
+<li>通讯：远程调用，线程，并发控制</li>
+<li>性能：为保证一致性，使用多机备份和负载问题</li>
+<li>容错：复制副本提升可用性和数据持久性。</li>
+</ol>
+<p><a href="/tags/Distributed/">系列文章</a></p>
+]]></content>
+    
+    <summary type="html">
+    
+      &lt;p&gt;分布式系统的分布式是指多台机器组成一个整体，具备存储和计算能力，理想情况下一个分布式系统可以像单机一样使用，只需要增加机器就可以提升整体性能。&lt;/p&gt;
+&lt;p&gt;巧豆一麻袋，为什么费那么大劲组合一堆机器而不是用配置更好的单机？是的，在大数据到来之前，很多公司就是靠做高配机器大赚
+    
+    </summary>
+    
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
+    
+    
+      <category term="Distributed" scheme="http://focinfi.wang/tags/Distributed/"/>
+    
+  </entry>
   
   <entry>
     <title>Rails 学习感想</title>
@@ -70,11 +831,12 @@
     <link href="http://focinfi.wang/2016/06/03/golang-poller/"/>
     <id>http://focinfi.wang/2016/06/03/golang-poller/</id>
     <published>2016-06-02T16:00:00.000Z</published>
-    <updated>2017-03-18T13:53:56.000Z</updated>
+    <updated>2017-03-18T23:44:29.000Z</updated>
     
     <content type="html"><![CDATA[<p>最近在通读 《The Go Programming Language》，真是好书。</p>
 <p>读到 gorotuine，想到之前写 javascript 时常常需要一个 poller 轮询一些后台任务的执行结果，其实用 golang 的 gorutine 和 channel 实现可以更简洁而高效。</p>
 <a id="more"></a>
+<iframe scrolling="no" width="100%" height="400" src="http://jsfiddle.net/Focinfi/tc5mrugb/embedded/result,js,resources,html/light" frameborder="0" allowfullscreen></iframe>
 <p>看代码：</p>
 <figure class="highlight go"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div><div class="line">16</div><div class="line">17</div><div class="line">18</div><div class="line">19</div><div class="line">20</div><div class="line">21</div><div class="line">22</div><div class="line">23</div><div class="line">24</div><div class="line">25</div><div class="line">26</div><div class="line">27</div><div class="line">28</div><div class="line">29</div><div class="line">30</div><div class="line">31</div><div class="line">32</div><div class="line">33</div><div class="line">34</div><div class="line">35</div><div class="line">36</div><div class="line">37</div><div class="line">38</div><div class="line">39</div><div class="line">40</div><div class="line">41</div><div class="line">42</div><div class="line">43</div><div class="line">44</div><div class="line">45</div><div class="line">46</div><div class="line">47</div><div class="line">48</div><div class="line">49</div></pre></td><td class="code"><pre><div class="line"><span class="comment">// Intervaler 是个接口用来让调用者自定义poller轮询时间间隔</span></div><div class="line"><span class="keyword">type</span> Intervaler <span class="keyword">interface</span> &#123;</div><div class="line">	Interval() time.Duration</div><div class="line">&#125;</div><div class="line"></div><div class="line"><span class="comment">// IntervalerFunc 用来将 func() time.Duration 转化成 Intervaler</span></div><div class="line"><span class="keyword">type</span> IntervalerFunc <span class="function"><span class="keyword">func</span><span class="params">()</span> <span class="title">time</span>.<span class="title">Duration</span></span></div><div class="line"></div><div class="line"><span class="title">func</span> <span class="params">(intervalerFunc IntervalerFunc)</span> <span class="title">Interval</span><span class="params">()</span> <span class="title">time</span>.<span class="title">Duration</span> &#123;</div><div class="line">	<span class="keyword">return</span> intervalerFunc()</div><div class="line">&#125;</div><div class="line"></div><div class="line"><span class="keyword">type</span> Poller <span class="keyword">struct</span> &#123;</div><div class="line">    <span class="comment">//要执行的方法</span></div><div class="line">	do           <span class="function"><span class="keyword">func</span><span class="params">()</span> <span class="title">error</span></span></div><div class="line">    //用于调用者传递停止信号</div><div class="line">	<span class="title">cancle</span>       <span class="title">chan</span> <span class="title">int</span></div><div class="line">    //下次调用的时间间隔</div><div class="line">	<span class="title">nextInterval</span> <span class="title">Intervaler</span></div><div class="line">&#125;</div><div class="line"></div><div class="line">// <span class="title">Poll</span> 轮询</div><div class="line"><span class="title">func</span> <span class="params">(poller *Poller)</span> <span class="title">Poll</span><span class="params">()</span> &#123;</div><div class="line">	<span class="keyword">for</span> &#123;</div><div class="line">		<span class="keyword">select</span> &#123;</div><div class="line">		<span class="keyword">case</span> &lt;-poller.cancle:</div><div class="line">			<span class="keyword">return</span></div><div class="line">		<span class="keyword">case</span> &lt;-time.After(poller.nextInterval.Interval()):</div><div class="line">			<span class="keyword">go</span> <span class="function"><span class="keyword">func</span><span class="params">()</span></span> &#123;</div><div class="line">				<span class="keyword">if</span> err := poller.do(); err != <span class="literal">nil</span> &#123;</div><div class="line">					log.Errorf(<span class="string">"Poll poller.go: polling method returns a error: %v"</span>, err)</div><div class="line">					<span class="comment">// 或者结束整个轮询</span></div><div class="line">					<span class="comment">// poller.Cancel()</span></div><div class="line">				&#125;</div><div class="line">			&#125;()</div><div class="line">		&#125;</div><div class="line">	&#125;</div><div class="line">&#125;</div><div class="line"></div><div class="line"><span class="comment">// Cancel 向 cancel 发送信号</span></div><div class="line"><span class="function"><span class="keyword">func</span> <span class="params">(poller *Poller)</span> <span class="title">Cancel</span><span class="params">()</span></span> &#123;</div><div class="line">	<span class="built_in">println</span>(<span class="string">"Polling stopped"</span>)</div><div class="line">	poller.cancle &lt;- <span class="number">1</span></div><div class="line">&#125;</div><div class="line"></div><div class="line"><span class="comment">// NewPoller 创建一个新的 Poller</span></div><div class="line"><span class="function"><span class="keyword">func</span> <span class="title">NewPoller</span><span class="params">(intervaler Intervaler, do <span class="keyword">func</span>()</span> <span class="title">error</span>) *<span class="title">Poller</span></span> &#123;</div><div class="line">	<span class="keyword">return</span> &amp;Poller&#123;do: do, cancle: <span class="built_in">make</span>(<span class="keyword">chan</span> <span class="keyword">int</span>), nextInterval: intervaler&#125;</div><div class="line">&#125;</div></pre></td></tr></table></figure>
 <p>再来看看如何使用：</p>
@@ -90,7 +852,7 @@
     
     </summary>
     
-      <category term="技术" scheme="http://focinfi.wang/categories/%E6%8A%80%E6%9C%AF/"/>
+      <category term="Tech" scheme="http://focinfi.wang/categories/Tech/"/>
     
     
       <category term="golang" scheme="http://focinfi.wang/tags/golang/"/>
@@ -196,158 +958,6 @@
     
     
       <category term="golang" scheme="http://focinfi.wang/tags/golang/"/>
-    
-  </entry>
-  
-  <entry>
-    <title>以 Huffman coding 为例看函数式编程</title>
-    <link href="http://focinfi.wang/2016/05/02/learn-functional-programming-from-huffman/"/>
-    <id>http://focinfi.wang/2016/05/02/learn-functional-programming-from-huffman/</id>
-    <published>2016-05-02T05:04:13.000Z</published>
-    <updated>2017-03-18T13:59:03.000Z</updated>
-    
-    <content type="html"><![CDATA[<blockquote>
-<p>不同编程即为不同解决问题的思路</p>
-</blockquote>
-<p>解决一个问题有很多思路，比如：</p>
-<ol>
-<li>过程式(C语言)：将解决问题的方式分解成若干步骤来控制数据。</li>
-<li>面向对象式 (Java/Ruby)：以对象为基本单位，定义其行为控制其内部状态，通过不同对象之间的协作解决问题。</li>
-<li>函数式(Lisp)：一切皆为函数，用连贯的思维方式定义过程，常用递归。</li>
-<li>组合式：将不同的解决方式组合起来，golang 经常会将面向对象与过程式组合起来。</li>
-</ol>
-<a id="more"></a>
-<h4 id="示例：-Huffman编码"><a href="#示例：-Huffman编码" class="headerlink" title="示例： Huffman编码"></a>示例： Huffman编码</h4><p>用 Lisp 的一个方言 Scheme 来实现：</p>
-<p>输入 <code>&#39;((A 1) (B 3) (C 2))</code>, A B C 为带编码字符，1 2 3 为出现次数。<br>输出 <code>&#39;((b 0) (a 0 1) c 1 1)</code></p>
-<h4 id="定义叶子节点"><a href="#定义叶子节点" class="headerlink" title="定义叶子节点"></a>定义叶子节点</h4><figure class="highlight lisp"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div></pre></td><td class="code"><pre><div class="line">(<span class="name">define</span> (<span class="name">make-leaf</span> symbol weight)</div><div class="line">  (<span class="name">list</span> 'leaf symbol weight))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">leaf</span>? object)</div><div class="line">  (<span class="name">eq</span>? (<span class="name">car</span> object) 'leaf))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">symbol-leaf</span> object)</div><div class="line">  (<span class="name">cadr</span> object))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">weight-leaf</span> object)</div><div class="line">  (<span class="name">caddr</span> object))</div></pre></td></tr></table></figure>
-<p>如果没有接触过 lisp 的同学可能对上面的表示方式有点陌生，其实就是用括号代表方法调用，括号里的第一个位置是方法名称，后面的是调用该方法的参数。</p>
-<p>上面的几行代码定义了叶子节点 leaf 及相关函数。</p>
-<h4 id="定义树节点"><a href="#定义树节点" class="headerlink" title="定义树节点"></a>定义树节点</h4><figure class="highlight lisp"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div><div class="line">16</div><div class="line">17</div><div class="line">18</div><div class="line">19</div><div class="line">20</div></pre></td><td class="code"><pre><div class="line">(<span class="name">define</span> (<span class="name">make-code-tree</span> left right)</div><div class="line">  (<span class="name">list</span> </div><div class="line">    left</div><div class="line">    right</div><div class="line">    (<span class="name">append</span> (<span class="name">symbols</span> left) (<span class="name">symbols</span> right))</div><div class="line">    (<span class="name">+</span> (<span class="name">weight</span> left) (<span class="name">weight</span> right))))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">left-branch</span> tree) (<span class="name">car</span> tree))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">right-branch</span> tree) (<span class="name">cadr</span> tree))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">symbols</span> tree)</div><div class="line">  (<span class="name">if</span> (<span class="name">leaf</span>? tree)</div><div class="line">    (<span class="name">list</span> (<span class="name">symbol-leaf</span> tree))</div><div class="line">    (<span class="name">caddr</span> tree)))</div><div class="line"></div><div class="line">(<span class="name">define</span> (<span class="name">weight</span> tree)</div><div class="line">  (<span class="name">if</span> (<span class="name">leaf</span>? tree)</div><div class="line">    (<span class="name">weight-leaf</span> tree)</div><div class="line">    (<span class="name">cadddr</span> tree)))</div></pre></td></tr></table></figure>
-<p>同样的道理，定义了用于在构造 Huffman 树中非叶子的节点 tree 及其相关取值函数。</p>
-<h4 id="有序-list-构造方法"><a href="#有序-list-构造方法" class="headerlink" title="有序 list 构造方法"></a>有序 list 构造方法</h4><figure class="highlight lisp"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div></pre></td><td class="code"><pre><div class="line">(<span class="name">define</span> (<span class="name">adjoin-set</span> x set)</div><div class="line">  <span class="comment">;如果 set 为空，则返回以 x 作为唯一元素的 list</span></div><div class="line">  (<span class="name">cond</span> ((<span class="name">null</span>? set) </div><div class="line">      (<span class="name">list</span> x)) </div><div class="line">    <span class="comment">;如果 set 的第一个元素的 weight 大于 x 的 weight，则将 x 和 set 组合成一个新的 list 返回</span></div><div class="line">    ((<span class="name">&gt;</span> (<span class="name">weight</span> (<span class="name">car</span> set)) (<span class="name">weight</span> x))</div><div class="line">      (<span class="name">cons</span> x set)) </div><div class="line">    <span class="comment">; 否则将 set 的以第一个只取出，让后递归调用 `adjoin-set`</span></div><div class="line">    (<span class="name">else</span> (<span class="name">cons</span> (<span class="name">car</span> set) (<span class="name">adjoin-set</span> x (<span class="name">cdr</span> set)))))) </div><div class="line">(<span class="name">define</span> (<span class="name">make-leaf-set</span> pairs)</div><div class="line">  (<span class="name">if</span> (<span class="name">null</span>? pairs)</div><div class="line">    '()</div><div class="line">    (<span class="name">let</span> ((<span class="name">pair</span> (<span class="name">car</span> pairs)))</div><div class="line">      (<span class="name">adjoin-set</span> (<span class="name">make-leaf</span> (<span class="name">car</span> pair) (<span class="name">cadr</span> pair))</div><div class="line">        (<span class="name">make-leaf-set</span> (<span class="name">cdr</span> pairs))))))</div></pre></td></tr></table></figure>
-<p> <code>adjoin-set</code> 的功能就是 x 插入到有序 list set 中，保证插入后的 list 仍然有序。lisp 中的 <code>cond</code> 可理解为 其他语言中的 <code>switch</code>，而 <code>cons</code> 可理解为将两个元素结合成一个 list。 乍一看这个所谓“插入”元素的方法有点奇怪，而且没有用任何<strong>临时变量</strong>。其思路将整个插入的过程用递归调用的方式表示： 用过程（函数）代替了临时变量。举了例子：<code>(adjoin-set 3 &#39;(1 2))</code>，执行顺序是：</p>
-<figure class="highlight lisp"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div></pre></td><td class="code"><pre><div class="line">(<span class="name">cons</span> <span class="number">1</span> (<span class="name">adjoin-set</span> <span class="number">3</span> '(<span class="number">2</span>)))</div><div class="line">(<span class="name">cons</span> <span class="number">1</span> (<span class="name">cons</span> <span class="number">2</span> (<span class="name">adjoin-set</span> <span class="number">3</span> '())))</div><div class="line">(<span class="name">cons</span> <span class="number">1</span> (<span class="name">cons</span> <span class="number">2</span> (<span class="name">cons</span> <span class="number">3</span> '())))</div><div class="line">(<span class="name">cons</span> <span class="number">1</span> (<span class="name">cons</span> <span class="number">2</span> '(<span class="number">3</span>)))</div><div class="line">(<span class="name">cons</span> <span class="number">1</span> '(<span class="number">2</span> <span class="number">3</span>))</div><div class="line">'(<span class="number">1</span> <span class="number">2</span> <span class="number">3</span>)</div></pre></td></tr></table></figure>
-<p>可以看到在执行序列中，推迟 <code>cons</code> 的执行，用参数求值压栈从而省去了临时变量。在  <code>make-leaf-set</code> 中思路也一样：不断地从 paris 中取元素，交给 <code>adjoin-set</code> 插入到 list 中。整个编写过程中基本上用程序流畅地表达了我们的解题思路。</p>
-<h4 id="Huffman树构造方法"><a href="#Huffman树构造方法" class="headerlink" title="Huffman树构造方法"></a>Huffman树构造方法</h4><p>在插入元素这种简单的问题中函数式威力还远远没有体现出来，请看下面构造 Huffman树 的函数实现：</p>
-<figure class="highlight lisp"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div></pre></td><td class="code"><pre><div class="line">(<span class="name">define</span> (<span class="name">make-tree</span> leaves)</div><div class="line">  (<span class="name">cond</span> ((<span class="name">or</span> (<span class="name">null</span>? (<span class="name">car</span> leaves)) (<span class="name">null</span>? (<span class="name">cadr</span> leaves)))</div><div class="line">      (<span class="name">error</span> <span class="string">"leaves is not enough"</span>))</div><div class="line">    ((<span class="name">null</span>? (<span class="name">cddr</span> leaves))</div><div class="line">      (<span class="name">make-code-tree</span> (<span class="name">car</span> leaves) (<span class="name">cadr</span> leaves)))</div><div class="line">    (<span class="name">else</span> (<span class="name">make-tree</span> (<span class="name">adjoin-set</span> (<span class="name">make-code-tree</span> (<span class="name">car</span> leaves) (<span class="name">cadr</span> leaves)) (<span class="name">cddr</span> leaves))))))</div></pre></td></tr></table></figure>
-<p>几行代码就将构造 Huffman树 的核心逻辑表达清楚了：将按 weight 升序 leaves 的前两个拿出来做成一个 tree node，<code>adjoin-set</code> 到剩下的 leaves 中，然后不断重复这个操作，直到 leaves 中只剩下两个元素，将这两个元素最为 最终 Huffman树 的左右子树，然后返回。怎么样？一气呵成。</p>
-<h4 id="编码"><a href="#编码" class="headerlink" title="编码"></a>编码</h4><p>对 Huffman树 遍历编码的实现也是精炼得有种思维的美感：<br>先进行左子树遍历，直到找到叶子节点，构造成结果 list 中一个元素，然后回到上一层递归，进入右子树，不断重复直到遍历完所有节点。</p>
-<figure class="highlight lisp"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div></pre></td><td class="code"><pre><div class="line">(<span class="name">define</span> (<span class="name">encode</span> tree)</div><div class="line">  (<span class="name">define</span> (<span class="name">visit</span> n bits)</div><div class="line">    (<span class="name">if</span> (<span class="name">leaf</span>? n)</div><div class="line">      <span class="comment">; 找到了一个叶子节点</span></div><div class="line">      (<span class="name">cons</span> (<span class="name">symbol-leaf</span> n) bits)</div><div class="line">      <span class="comment">; 用 cons 对 visit 的递归调用</span></div><div class="line">      (<span class="name">cons</span> (<span class="name">visit</span> (<span class="name">left-branch</span> n) (<span class="name">cons</span> <span class="number">0</span> bits))</div><div class="line">        (<span class="name">visit</span> (<span class="name">right-branch</span> n) (<span class="name">cons</span> <span class="number">1</span> bits)))))</div><div class="line">  (<span class="name">visit</span> tree '()))</div><div class="line"></div><div class="line"><span class="comment">;测试</span></div><div class="line">(<span class="name">define</span> leaf-set (<span class="name">make-leaf-set</span> '((A <span class="number">1</span>) (B <span class="number">3</span>) (C <span class="number">2</span>))))</div><div class="line">(<span class="name">define</span> tree (<span class="name">make-tree</span> leaf-set))</div><div class="line">(<span class="name">encode</span> tree) <span class="comment">; outputs: ((b 0) (a 0 1) c 1 1)</span></div></pre></td></tr></table></figure>
-<p>详细代码请进 <a href="https://github.com/Focinfi/scheme-practices/blob/master/haffman.scm" target="_blank" rel="external">github</a></p>
-<p>ps: 本篇用到部分《计算机程序的构造与解析》代码。强烈建议大家学习 MIT 的这门公开课。</p>
-]]></content>
-    
-    <summary type="html">
-    
-      &lt;blockquote&gt;
-&lt;p&gt;不同编程即为不同解决问题的思路&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;解决一个问题有很多思路，比如：&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;过程式(C语言)：将解决问题的方式分解成若干步骤来控制数据。&lt;/li&gt;
-&lt;li&gt;面向对象式 (Java/Ruby)：以对象为基本单位，定义其行为控制其内部状态，通过不同对象之间的协作解决问题。&lt;/li&gt;
-&lt;li&gt;函数式(Lisp)：一切皆为函数，用连贯的思维方式定义过程，常用递归。&lt;/li&gt;
-&lt;li&gt;组合式：将不同的解决方式组合起来，golang 经常会将面向对象与过程式组合起来。&lt;/li&gt;
-&lt;/ol&gt;
-    
-    </summary>
-    
-      <category term="j技术" scheme="http://focinfi.wang/categories/j%E6%8A%80%E6%9C%AF/"/>
-    
-    
-      <category term="scheme" scheme="http://focinfi.wang/tags/scheme/"/>
-    
-  </entry>
-  
-  <entry>
-    <title>前端入门学习资料推荐</title>
-    <link href="http://focinfi.wang/2016/03/23/material-for-front-end-beginner/"/>
-    <id>http://focinfi.wang/2016/03/23/material-for-front-end-beginner/</id>
-    <published>2016-03-23T05:11:52.000Z</published>
-    <updated>2017-03-18T13:59:27.000Z</updated>
-    
-    <content type="html"><![CDATA[<h3 id="基本功"><a href="#基本功" class="headerlink" title="基本功"></a>基本功</h3><ol>
-<li>英语，查看资料尽量看英文</li>
-<li>C语言，数据结构，计算机网络(HTTP)</li>
-<li>学会利用 Google，有编程问题去 stackoverflow.com 上找答案</li>
-<li>了解 git，学会使用 github.com</li>
-</ol>
-<a id="more"></a>
-<h3 id="书籍资料"><a href="#书籍资料" class="headerlink" title="书籍资料"></a>书籍资料</h3><ol>
-<li><p><a href="http://book.douban.com/subject/25752357/" target="_blank" rel="external">《Head first HTML CSS》</a></p>
-</li>
-<li><p><a href="http://book.douban.com/subject/1236999/" target="_blank" rel="external">《The C Programming Language》</a></p>
-</li>
-<li><p><a href="http://book.douban.com/subject/6424904/" target="_blank" rel="external">《大话数据结构》</a></p>
-</li>
-<li><p><a href="http://book.douban.com/subject/25863515/" target="_blank" rel="external">《图解HTTP》</a></p>
-</li>
-<li><p><a href="http://book.douban.com/subject/3590768/" target="_blank" rel="external">《JavaScript语言精粹》</a></p>
-</li>
-<li><p><a href="http://book.douban.com/subject/10549733/" target="_blank" rel="external">《JavaScript权威指南》</a>（可作字典使用）</p>
-</li>
-</ol>
-<h3 id="文章推荐"><a href="#文章推荐" class="headerlink" title="文章推荐"></a>文章推荐</h3><ol>
-<li><p><a href="http://www.liaoxuefeng.com/wiki/0013739516305929606dd18361248578c67b8067c8c017b000" target="_blank" rel="external">廖雪峰git教程</a></p>
-</li>
-<li><p><a href="http://www.liaoxuefeng.com/wiki/001434446689867b27157e896e74d51a89c25cc8b43bdb3000" target="_blank" rel="external">廖雪峰 JavaScript 教程</a></p>
-</li>
-<li><p><a href="https://github.com/unruledboy/WebFrontEndStack" target="_blank" rel="external">unruledboy/WebFrontEndStack
-</a></p>
-</li>
-<li><p><a href="https://www.zhihu.com/question/20824615" target="_blank" rel="external">如何优雅地使用 Stack Overflow？</a></p>
-</li>
-<li><p><a href="http://blog.csdn.net/wuhenliushui/article/details/20038819/" target="_blank" rel="external">当你在浏览器地址栏输入一个URL后回车，将会发生的事情？</a>（不必深究每一个细节，但要有整体概念）</p>
-</li>
-</ol>
-<h3 id="视频推荐"><a href="#视频推荐" class="headerlink" title="视频推荐"></a>视频推荐</h3><p><a href="http://www.imooc.com/course/programdetail/pid/32" target="_blank" rel="external">慕课网 <strong>Web前端工程师</strong> 学习计划</a><br>（非常系统，如果看不下去书可以尝试看视频教程）</p>
-<h3 id="在线学习"><a href="#在线学习" class="headerlink" title="在线学习"></a>在线学习</h3><ol>
-<li><a href="https://www.codecademy.com" target="_blank" rel="external">https://www.codecademy.com</a> </li>
-<li>实验楼 <a href="https://www.shiyanlou.com" target="_blank" rel="external">https://www.shiyanlou.com</a></li>
-</ol>
-<h3 id="写在最后"><a href="#写在最后" class="headerlink" title="写在最后"></a>写在最后</h3><ol>
-<li><p>如何保持持续的热情？</p>
-<ol>
-<li>知识引导实践，争取在最短的时间内将学习到的东西写成能跑起来的代码，保证 <strong>持续的正面反馈</strong>。</li>
-<li>实践反补对知识的理解，举一反三。</li>
-<li>螺旋式学习节奏。</li>
-</ol>
-</li>
-<li><p>时间很紧张怎么办？</p>
-<ol>
-<li>从上到下的学习思路，从问题出发，或者说是从项目出发，需要什么就去学，不懂的就去问，快速实现最终目标。</li>
-<li><strong>但请不要忘记，建立自己的知识体系</strong>。</li>
-</ol>
-</li>
-<li><p>编程水平提升思路：</p>
-<ol>
-<li><p>中国有句古话：<strong>文章三分写七分改</strong>。编程也是如此，复制粘贴只能作万里长征第一步，千万不可以为革命就此胜利。第一个项目不论大小，务必做到极致，每一个细节都力求做到最好，可以向书籍上的示例代码学习，可以向开源项目学习，可以请前辈 review。</p>
-</li>
-<li><p>Do it, Do it right, Do it better.</p>
-</li>
-</ol>
-</li>
-</ol>
-<blockquote>
-<p>May the force be with you.</p>
-</blockquote>
-]]></content>
-    
-    <summary type="html">
-    
-      &lt;h3 id=&quot;基本功&quot;&gt;&lt;a href=&quot;#基本功&quot; class=&quot;headerlink&quot; title=&quot;基本功&quot;&gt;&lt;/a&gt;基本功&lt;/h3&gt;&lt;ol&gt;
-&lt;li&gt;英语，查看资料尽量看英文&lt;/li&gt;
-&lt;li&gt;C语言，数据结构，计算机网络(HTTP)&lt;/li&gt;
-&lt;li&gt;学会利用 Google，有编程问题去 stackoverflow.com 上找答案&lt;/li&gt;
-&lt;li&gt;了解 git，学会使用 github.com&lt;/li&gt;
-&lt;/ol&gt;
-    
-    </summary>
-    
-      <category term="技术" scheme="http://focinfi.wang/categories/%E6%8A%80%E6%9C%AF/"/>
-    
-    
-      <category term="前端" scheme="http://focinfi.wang/tags/%E5%89%8D%E7%AB%AF/"/>
     
   </entry>
   

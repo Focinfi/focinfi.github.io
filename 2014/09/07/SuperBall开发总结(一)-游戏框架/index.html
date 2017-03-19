@@ -1,0 +1,56 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> SuperBall开发总结(一)-游戏框架 · 王安正的随想集</title><meta name="description" content="SuperBall开发总结(一)-游戏框架 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">SuperBall开发总结(一)-游戏框架</h1><div class="post-info">2014年9月7日</div><div class="post-content"><p>游戏开发对我来说一直以来都有种神奇的魔力，也许是人类的本能，对屏幕上能动起来的东西有无比的好奇心。</p>
+<p>这次想要开发的是一个小游戏，大概就是玩家用一个小木板去接一个小球，让小球反弹去碰撞飞在天上的BOSS</p>
+<p><strong>源码：</strong> <a href="https://github.com/Focinfi/SuperBall-HTML5" target="_blank" rel="external">SuperBall</a><br><strong>点击<a href="http://superball-html5.coding.io/" target="_blank" rel="external">这里</a>玩一下</strong><br><strong>游戏截图：</strong><br><img src="http://upload-images.jianshu.io/upload_images/17174-4de1c8985017caba.png" alt="QQ20140901-1.png"></p>
+<p>在真正动手开发游戏之前，首先要理解游戏开发的核心机制</p>
+<ol>
+<li><p>####死循环</p>
+<p> 每个单位时间运行指定函数，直到游戏状态发生改变，通常是游戏暂停、继续、胜利或是失败等。</p>
+<p> 由于人眼的视觉暂留现象，我们每个很短的一段时间（至少1/24秒）渲染一遍画面，连续播放就会产生动画的视觉效果。</p>
+</li>
+<li><p>####游戏渲染</p>
+<ol>
+<li>获取当前小球，木板和BOOS的各个属性</li>
+<li>在Canvas上绘制一些形状，多边形，圆形；设置一些属性：位置、大小、颜色等。</li>
+</ol>
+</li>
+<li><p>####键盘点击监听</p>
+<ol>
+<li>上下左右：改变木板坐标和坡度，</li>
+<li>QWER：设置木板特定属性</li>
+<li>P: 游戏暂停与继续</li>
+</ol>
+</li>
+<li><p>####碰撞检测</p>
+<p> 碰撞检测其实就是根据当前小球、木板和BOSS的坐标，通过一些简单的计算判断图形是否重叠，若重叠即视为碰撞</p>
+<p> 具体的碰撞检测：</p>
+<ol>
+<li>小球与BOSS是否碰撞</li>
+<li>小球是否落入水中</li>
+<li>小球是否撞到木板上</li>
+<li>小球是否撞到墙壁</li>
+<li>木板是否跑出画面</li>
+<li>BOSS是否撞到墙壁</li>
+</ol>
+</li>
+<li><p>####状态更新</p>
+<p>根据游戏状态的相关属性，碰撞检测的结果以及键盘监听结果更新各个部分的属性</p>
+<ol>
+<li>游戏状态更新：作为死循环跳出与否的条件</li>
+<li>小球：圆心坐标，x方向和y方向的速度。</li>
+<li>木板：坐标，长度，坡度，倾斜方向</li>
+<li>BOSS：偏移量，结构数组    </li>
+<li>游戏时间，得分</li>
+<li>F技能冷却倒计时</li>
+</ol>
+</li>
+</ol>
+<p>####UI辅助<br>动画效果会用到游戏死循环的方式</p>
+<ol>
+<li>按钮抖动</li>
+<li>信息板滑动</li>
+<li>信息框变大变小</li>
+</ol>
+<p>####数据持久化</p>
+<p>用到了webSQL来保存玩家最佳纪录</p>
+<p><a href="http://www.jianshu.com/p/22960006a381" target="_blank" rel="external">SuperBall开发总结(二)-让小球动起来</a></p>
+</div></article></div></main><footer><div class="paginator"><a href="/2014/09/15/SuperBall开发总结(三)-加入木板/" class="prev">上一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

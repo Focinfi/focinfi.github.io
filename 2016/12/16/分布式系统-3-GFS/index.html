@@ -1,0 +1,25 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> 分布式系统-3-GFS · 王安正的随想集</title><meta name="description" content="分布式系统-3-GFS - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">分布式系统-3-GFS</h1><div class="post-info">2016年12月16日</div><div class="post-content"><p>在前面的 <a href="http://www.jianshu.com/p/a71258c28ff2" target="_blank" rel="external">MapReduce</a> 中我们聊到这个至简的模型为我们构建分布式系统开启了新的大门，今天我们来聊聊 MapReduce 中负责输入输出的文件系统案例。</p>
+<p>首先我们来了解一下 GFS 的设计目标：在成千上百台 Linux 普通机器存储巨量数据，保证高并发。</p>
+<p>前几篇一直提一致性，啥是一致性？举个例子，我在支付宝上存了 100后，在全国无论什么地方连上哪台支付宝的服务器，我的账户上都得增加 100。如果支付宝全国只有一万个人在用，一台机器一个数据库就足够了，但用户的数量是数以亿计，所以肯定是好多机器在服务，所以如果保证不了一致性，是一秒钟都干不下去的。</p>
+<p>但话又说回来，不是每家企业都是像支付宝一样一分钱都不能错，比如微博，你关注的明星发了一个动态，1分钟后你才刷新到，其实也是可以接受，所以根据不同业务对一致性的要求不同，可分为强一致性和弱一致性。</p>
+<p>我们以文件系统举例，弱一致性的文件读取操作 <code>read()</code> 可能会读不到最新写入的数据；而强一致性保证 <code>read()</code> 始终读到最新写入的数据。不同的场景有不同的一致性策略，那么理想状态下的一致性模型是怎样的？</p>
+<ol>
+<li>文件副本可以像没有副本的文件系统一样使用：像多个客户端访问一台机器上某个磁盘上的文件。</li>
+<li>如果一个应用正在写入，之后的读取操作应该读到写入的内容。</li>
+<li>两个应用并发写入同一个文件。如果该文件不存在，最后文件中可能会有混合的内容。</li>
+<li>如果两个应用并发写入同一个目录，第一个先写，另一个后写。</li>
+</ol>
+<p>理想的拦路虎是什么：机器故障，网络隔离，要一致性又要高并发。然后会发现自相矛盾的<strong>理想</strong>是不可能实现的。所以 GFS 在现实和理想中间找到一个平衡点。看看现实是什么：</p>
+<ol>
+<li>大部分文件都很大，GB 级别</li>
+<li>文件不用删除</li>
+<li>文件的修改只有追加操作</li>
+<li>偶尔读不到最新数据也可以接受，毕竟浏览网页不是查看账户余额</li>
+<li>最重要的是，数据量巨大，并发量大，性能要求很高</li>
+</ol>
+<p>在 GFS 架构中有 Client，Master Server 和 Chunk Server 三种角色，文件被分为固定大小的数据块，在 Chunk 上使用多(默认 3)台机器进行主从备份提高可用性，而 Master 主要管理元数据和 Chunk。对于 Master 操作如修改目录是强一致性的，而对于 Chunk 是弱一致性。</p>
+<p>有道是解决主要矛盾，忽略次要矛盾。既然要提高并发量和可用性，我们认为每个文件追加操作在所有副本执行成功就算本次客户端操作成功，而对于一条数据重复添加，两条追加记录中插入其他数据都视为正常，这大大提高了并发，但要求业务代码区别每个记录的唯一性。这里并发性和可用性是主要矛盾，而一致性则是次要矛盾。</p>
+<p>GFS 对 Master Server 和 Chunk Server 合理分配了各自的负载重点，让 Master 保持轻量和简单的一致性模型；而 Chunk Server 负责实际的文件数据与 Linux 的交互以及主副本与其他备份的复制优化。</p>
+<p>容错方面，Master 采用传统的 Write Ahead Log 和 CheckPoint 机制外几台热备份 Master。而 Chunk Server 采用主从备份，一致性要求不高。</p>
+<p>学习一个系统，场景很重要哦。GFS 为大规模读写，追加，吞吐量巨大，一致性要求不高的需求设计。所以不适合大量小文件，多客户端对同一文件随机修改，master 逻辑复杂且容易出错的场景。</p>
+</div></article></div></main><footer><div class="paginator"><a href="/2016/12/23/分布式系统-3-主从复制/" class="prev">上一篇</a><a href="/2016/12/09/分布式系统-2-RPC/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

@@ -1,0 +1,17 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> 分布式系统-8-FaRM · 王安正的随想集</title><meta name="description" content="分布式系统-8-FaRM - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">分布式系统-8-FaRM</h1><div class="post-info">2017年1月27日</div><div class="post-content"><blockquote>
+<p>论文：<a href="https://pdos.csail.mit.edu/6.824/papers/farm-2015.pdf" target="_blank" rel="external">FaRM</a></p>
+</blockquote>
+<p>前面我们聊到对于分布式事务来说，很难同时保证一致性，高并发和可用性(CAP 原则)，核心的原因是资源竞争，这里的资源是指 master 的 CPU，内存和网络，由于要保证一致性就得对资源加锁，但要提高并发性就得减少锁的消耗，而要满足可用性就不得不对数据增加备份，每增加一个备份都会增加了一致性的负担。</p>
+<p>当然我们看整个系统不能只看上层的软件部分，因为我们最终的目的是让硬件处理我们的数据，而软件是对硬件一层一层的封装。所以上面所述的问题是当前计算机硬件基础设施所决定的。</p>
+<p>今天我们我讲的 FaRM(fast remote memory) 目标是挑战 CAP 原则，主要是针对新一代基础设施提出的设计方案。什么新新硬件？Non-Volatile DRAM 和 RMDA。</p>
+<p>RMDA (Remote Memory Direct Access)，简单的说就是在 MDA 的基础上实现机器和机器之间的远程数据传输，而数据的读取复制都不需要 CPU 参与。</p>
+<p>Non-Volatile DRAM，可以理解为 SSD (固态硬盘)</p>
+<p>两个技术带来的好处是解放了 CPU 的 IO 负载。然后我们的真个事务处理流程变成四阶段提交：</p>
+<ol>
+<li>Lock：某个集群的 Primary 接受 client 请求，加锁，处理本地数据，更新版本号。</li>
+<li>Validation：FaRM 通过 RDMA 方式读写所有涉及到的数据版本号，判断失误是否冲突，此过程不需要服务器的 CPU 参与。</li>
+<li>Backup commit：备份服务器写入本次事务的操作 log，不需要 CPU 参与。</li>
+<li>Primary commit：以 RDMA 的方式向 Primary 写入 commit-primary 数据，Primary 的监听程序会释放锁。</li>
+</ol>
+<p>正所谓有得必有失，由于 IO 不经过 CPU，导致某些情况下 CPU 失去了对数据的控制，比如不能确定本次事务是否有足够的存储空间，所以需要在准备阶段需要预约足够的空间。</p>
+</div></article></div></main><footer><div class="paginator"><a href="/2017/02/03/分布式系统-9-释放一致性/" class="prev">上一篇</a><a href="/2017/01/20/分布式系统-7-乐观并发控制/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

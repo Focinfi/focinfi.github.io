@@ -1,0 +1,80 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> SuperBall开发总结(二)-让小球动起来 · 王安正的随想集</title><meta name="description" content="SuperBall开发总结(二)-让小球动起来 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">SuperBall开发总结(二)-让小球动起来</h1><div class="post-info">2014年9月22日</div><div class="post-content"><p>有了上篇<a href="http://www.jianshu.com/p/JYLt1P" target="_blank" rel="external">SuperBall开发总结(一)-游戏框架</a>，我们可以用JavaScript来做一个有趣的小实验。</p>
+<p>其实就是在一个封闭的小盒子里，有个小球在不停地弹来弹去。</p>
+<p>####实验效果 </p>
+<p><a href="http://jsfiddle.net/Focinfi/tc5mrugb/16/" target="_blank" rel="external">SuperBall_01-Add_A_BALL</a></p>
+<p>注意JavaScript代码，由于该网站将提交的Javascript代码用<code>window.onload = function(){}</code>封装，所以做了一些微调。</p>
+<p>####首先新建一个 canvas </p>
+<pre><code>&lt;canvas id=&quot;count_down_canvas&quot;
+        width=&quot;1024&quot; height=&quot;768&quot;
+        style=&quot;border:1px grey solid;display: block;
+               margin: 20px&quot;&gt;&lt;/canvas&gt;`
+</code></pre><p>####然后设置一个小球对象</p>
+<pre><code>var ball = {
+         x :  200 , 
+         y :  200, 
+         r :  10, 
+         vx : 80, 
+         vy : -80, 
+         color : &quot;rgb(0, 122, 122)&quot;};`
+var frequency = 25; //每个1/25秒刷新一次`
+</code></pre><p>####设置主循环函数<br>    window.onload = function(){</p>
+<pre><code>    var canvas = document.getElementById(&quot;super_ball_canvas&quot;);
+    canvas.width = 300;
+    canvas.height = 300;
+    var context = canvas.getContext(&quot;2d&quot;);
+
+
+    setInterval(
+            function(){
+                render(context); //渲染函数
+                checkHit(); //碰撞检测函数
+                update(); //状态更新函数
+            },
+            frequency
+    );
+}
+</code></pre><p>这里的<code>setInterval()</code>函数作用是每个<code>1/frequency</code>时间执行一次<code>function(){}</code>里面的函数</p>
+<p>####render()函数<br>    function render(context){<br>        //清空当前画布<br>        context.clearRect(0, 0, context.canvas.width, context.canvas.height);        </p>
+<pre><code>    //画圆
+    context.beginPath();        
+    //参数：圆心X，圆心Y，半径R，起始角度，终止角度，（顺时针）
+    context.arc(ball.x, ball.y, ball.r, 0, 2*Math.PI);
+    context.closePath();
+
+    //填充颜色
+    context.fillStyle= ball.color;
+    context.fill();
+}
+</code></pre><p>这里绘制的基本思路是现将上次绘制的小球清空，再绘制新的小球</p>
+<p>用到了一些基本的绘图函数，值得一提的是<code>beginPath()</code>和<code>closePath()</code>将当前图形封闭，不会影响也不会受其他图形的影响</p>
+<p>####checkHit()函数<br>    function checkHit(){</p>
+<pre><code>    if(ball.x &lt;= ball.r){
+        ball.x = ball.r;
+        ball.vx *= -1;
+    }
+
+    if(ball.x &gt;= 300 - ball.r){
+        ball.x = 300 - ball.r;
+        ball.vx *= -1;
+    }
+
+    if(ball.y &lt;= ball.r){
+        ball.y = ball.r;
+        ball.vy *= -1;
+    }
+
+    if(ball.y &gt;= 300 - ball.r){
+        ball.y = 300 - ball.r;
+        ball.vy *= -1;
+    }
+
+}
+</code></pre><p>这个函数很简单，主要是判断小球是否碰到或者已经超过边界，若符合条件，则要调整小球的坐标和速度。</p>
+<p>这里有个细节，将小球的坐标拉回边界值，目的是防止速度过大导致小球在下一时刻依然“碰撞”而无法“反弹”。</p>
+<p>####update()函数<br>    function update(){<br>        ball.x += ball.vx / frequency;<br>        ball.y += ball.vy / frequency;<br>    }</p>
+<p>非常简单的<code>update()</code>函数，其实就是初中物理知识，s = s0 + vt。只是这里把速度的值与更新频率做了一个简单的换算。</p>
+<p>####总结</p>
+<p>从这简单的几行代码中可以看出，让小球按照我们的规则动起来，其实非常简单，只需要设计好简单逻辑框架和一点物理知识。</p>
+<p>这只是用于学习游戏开发的一些基本的机制，而对于一个完善的游戏引擎来说，需要考虑的地方就会复杂的多。</p>
+<p>下一篇<a href="http://www.jianshu.com/p/a6022b2ba33d" target="_blank" rel="external">SuperBall开发总结(三)-加入木板</a>将介绍，玩家可以控制的木板如何加入游戏当中。</p>
+</div></article></div></main><footer><div class="paginator"><a href="/2014/09/29/SuperBall开发总结(五)-优化项目结构/" class="prev">上一篇</a><a href="/2014/09/15/SuperBall开发总结(三)-加入木板/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

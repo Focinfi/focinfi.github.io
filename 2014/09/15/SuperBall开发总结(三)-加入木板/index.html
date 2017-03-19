@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> SuperBall开发总结(三)-加入木板 · 王安正的随想集</title><meta name="description" content="SuperBall开发总结(三)-加入木板 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">SuperBall开发总结(三)-加入木板</h1><div class="post-info">2014年9月15日</div><div class="post-content"><p>有了上个物理实验<a href="http://www.jianshu.com/p/22960006a381" target="_blank" rel="external">SuperBall开发总结(二)-让小球动起来</a>，其实就真正明白了这个游戏的整体框架。</p>
+<p>以后的工作就是丰富<code>render()</code>, <code>checkHit()</code>和<code>update()</code>，当然当代码量逐渐增多时，我们还需要将代码分块，便于阅读、扩展和维护。</p>
+<p>现在我们要将游戏中玩家控制的木板实现出来.</p>
+<p>####完成效果<br><a href="http://jsfiddle.net/Focinfi/tc5mrugb/13/" target="_blank" rel="external">SuperBall_02-Add_A_BOARD</a><br>需要先鼠标左键点击一下效果框(Result框)，获取焦点后，才会将键盘事件监听导向木板。</p>
+<p>####加入木板对象</p>
+<pre><code>var board = { 
+               x : 100, 
+               y : 200 -10, 
+               weight : 4, 
+               height : 5, c
+               olor : &quot;grey&quot;
+               }                   
+</code></pre><p>####添加木板渲染代码</p>
+<pre><code>//render the board
+context.beginPath();
+context.moveTo(board.x, board.y);
+context.lineTo(board.x + board.width, board.y);
+context.lineWidth = board.weight;
+context.strokeStyle = board.color;
+context.stroke();
+context.closePath();
+</code></pre><p>####添加小球碰撞木板的检测代码</p>
+<pre><code>//check the ball hit the board
+if(ball.x &gt;= board.x &amp;&amp; ball.x &lt;= board.x + board.width)
+    if(ball.y &gt;= board.y - board.weight/2 - ball.r){
+
+        ball.y = board.y - board.weight/2 - ball.r;
+        ball.vy *= -1;
+    }            
+</code></pre><p>注意这里判断标准的细节，由于木板是用一条线画出来的，所以木板的长度是<code>board.width</code>而宽度是<code>board.weight</code></p>
+<p>####添加键盘监听<br>        document.onkeydown = checkKeyDown;</p>
+<pre><code>function checkKeyDown(event){
+        switch (event.keyCode) {
+            case 37: //left
+                board.x -= 20;
+                break;
+
+            case 39: //right
+                board.x += 20;
+                break;
+
+        }
+    }
+</code></pre><p>####别让木板跑出去<br>        //ensure the board is in the canvas<br>        if(board.x &lt;= 0)<br>            board.x = 0;</p>
+<pre><code>if(board.x &gt;= 300 - board.width)
+    board.x = 300 - board.width;            
+</code></pre><p>这里的键盘监听函数主要是捕获键盘点击的代码，而向左键是<strong>37</strong>， 向右键是<strong>39</strong>.<br><a href="http://www.jianshu.com/p/256459929ea2" target="_blank" rel="external">SuperBall开发总结(四)-BOSS出场</a></p>
+</div></article></div></main><footer><div class="paginator"><a href="/2014/09/22/SuperBall开发总结(二)-让小球动起来/" class="prev">上一篇</a><a href="/2014/09/07/SuperBall开发总结(一)-游戏框架/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

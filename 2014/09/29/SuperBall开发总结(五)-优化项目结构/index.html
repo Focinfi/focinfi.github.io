@@ -1,0 +1,204 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> SuperBall开发总结(五)-优化项目结构 · 王安正的随想集</title><meta name="description" content="SuperBall开发总结(五)-优化项目结构 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">SuperBall开发总结(五)-优化项目结构</h1><div class="post-info">2014年9月29日</div><div class="post-content"><p>是的，为了丰富我们的游戏内容，是时候规划一下我们的项目结构了。</p>
+<pre><code>SuperBall
+ ├──index.html     //游戏显示画面
+ ├──js
+ ├   ├─vlues.js    //游戏使用数值，参数
+ ├   ├─gameDb.js   //游戏webSQL
+ ├   ├─suport.js   //辅助函数
+ ├   ├─main.js     //主逻辑函数
+ ├   ├─renders.js  //渲染函数
+ ├   ├─checkHit.js //碰撞检测函数
+ ├   └─update.js   //状态更新函数           
+ ├──css
+ ├──images         //游戏图片资源
+ └──sounds         //游戏声音资源
+</code></pre><p>####JavaScript文件顺序<br>        <head><br>            …<br>            <title>SuperBall</title><br>            <link rel="stylesheet" href="css/style.css"><br>            <script src="js/values.js"></script><br>            <script src="js/gameDB.js"></script><br>            …<br>        </head></p>
+<p><code>values.js</code>文件要在第一个引用。</p>
+<p>这里文件载入的顺序之所以讲究，原因在于我们的JavaScript代码虽然在不同的文件中，但是浏览器确实顺序解释，所以当我们还没有涉及到JavaScript的MVC设计理念时，我们的所有JavaScript代码实际上是在一个命名空间的，所以必然要先定义变量或常量再使用。</p>
+<p>####values.js – 全局变量，游戏参数</p>
+<ol>
+<li><p>一些游戏常量，例如游戏方块颜色数组</p>
+<pre><code>var BLOCK_COLORS = [&quot;grey&quot;, &quot;orange&quot;, &quot;blue&quot;, &quot;purple&quot;, &quot;green&quot;];
+</code></pre></li>
+<li><p>游戏配置参数，例如游戏画面(canvas)的大小，小球的属性</p>
+<pre><code>//canvas
+var CANVAS_HEIGHT = 500;
+var CANVAS_PADDING = 30;
+
+//ball
+var SUPER_BALL_R = 10; 
+var BALL_X = CANVAS_HEIGHT/2;
+var BALL_Y = CANVAS_HEIGHT * 0.7;
+...
+</code></pre></li>
+<li><p>游戏运行时的状态变量</p>
+<ol>
+<li><p>UI变量</p>
+<pre><code>//game score board
+var gameBestTimeBoard;
+var gameBestHitNumBoard;
+...    
+</code></pre></li>
+<li><p>游戏状态变量</p>
+<pre><code>var nowGameTime = 0;
+var gameRuntimeInterval,
+...
+</code></pre></li>
+<li><p>小球变量</p>
+<pre><code>var ball = {x : BALL_X, y : BALL_Y, a : 2, vx : BALL_VX, vy : BALL_VY, color : colors[4], speed_up : false};
+</code></pre></li>
+<li><p>…</p>
+</li>
+</ol>
+</li>
+</ol>
+<p>####mian.js – JavaScript中控制入口</p>
+<pre><code>window.onload = function(){
+
+        initGameRes();
+
+        //select the develop mode
+        developMode(PLAY);
+
+        document.onkeydown = checkKeyDown;
+
+        gameRuntimeInterval = setInterval(
+            function(){
+                gameTime++;
+            },
+            10
+        );
+
+        gameBeginning();
+
+    }
+
+
+    function gameBeginning(){
+        ...
+    }
+
+    function countDown(){
+        ...
+    }
+
+    function gameStart(){
+        ...
+    }
+
+    function gamePause(){
+        ...
+    }
+
+    function gameWin(){
+        ...
+    }
+
+    function gameOver(type, words){
+        ...
+    }
+
+    function gameBug(){
+        ...
+    }
+
+
+    function render(context){
+        context.clearRect(0, 0, context.canvas.width, context.canvas.height);
+
+        renderBlocks(context);
+
+        renderBall(context);
+
+        ...
+
+
+    }
+
+    function checkHit(){
+
+        checkGameState();
+
+        checkHitBorder();
+
+        ...
+    }
+
+
+    function update(){
+
+        updateBlocks();
+
+        updateSuperBall();
+
+        ...
+
+    }
+
+    function checkKeyDown(event){
+        switch (event.keyCode) {
+            case 37:
+                board.x -= 20;
+                break;
+            ...
+
+            default:break;
+        }
+    }
+</code></pre><p>从这个入口文件可以看出基本上控制整个游戏的游戏状态</p>
+<ol>
+<li>初始化UI组件</li>
+<li>设置运行模式、调用键盘监听</li>
+<li>设置游戏运行时循环，游戏时间基准</li>
+<li>进入游戏开场状态</li>
+<li>将<code>renders.js checkHit.js update.js</code>中的各个函数整合进<code>render() checkHit() update()</code>三个函数中方便游戏循环调用</li>
+</ol>
+<p>####support.js – 辅助函数</p>
+<ol>
+<li><p>一些需要计算具体数值的函数</p>
+<pre><code>//get board.x
+function getBoardX(){
+    ...
+}
+
+//get board y
+function getBoardY(){
+    ...
+}
+
+...
+</code></pre></li>
+<li><p>设置属性的函数</p>
+<pre><code>function setGameResultData(){
+    ...
+}
+
+function initGameAttr(){
+    ...
+}
+
+function initGameRes(){
+    ...
+}
+
+...
+</code></pre></li>
+<li><p>UI动态效果的函数</p>
+<pre><code>function showBossDialogSoon(left, words){
+    ...
+}
+
+function showGameResultBoard(){
+    ...
+}
+
+...
+</code></pre></li>
+</ol>
+<p>####gameDB – 游戏比分存储<br>        superBallDB = openDatabase(“super_ball_db”, “1.0”, “game_score_table”, 1024 <em> 1024 </em> 5);</p>
+<pre><code>...
+
+gameScoreFunction.game_score_functions = function(){}
+
+...
+</code></pre></div></article></div></main><footer><div class="paginator"><a href="/2014/10/06/SuperBall开发总结(六)-UI动画设计/" class="prev">上一篇</a><a href="/2014/09/22/SuperBall开发总结(二)-让小球动起来/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>

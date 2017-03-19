@@ -1,0 +1,147 @@
+<!DOCTYPE html><html lang="zh-cn"><head><meta charset="utf-8"><meta name="X-UA-Compatible" content="IE=edge"><title> SuperBall开发总结(四)-BOSS出场 · 王安正的随想集</title><meta name="description" content="SuperBall开发总结(四)-BOSS出场 - 王安正"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png"><link rel="stylesheet" href="/css/apollo.css"><link rel="search" type="application/opensearchdescription+xml" href="http://focinfi.wang/atom.xml" title="王安正的随想集"></head><body><div class="wrap"><header><a href="/" class="logo-link"><img src="http://oe1fr65ie.bkt.clouddn.com/avatar_lotus_small.png" alt="logo"></a><ul class="nav nav-list"><li class="nav-list-item"><a href="/" target="_self" class="nav-list-link">文章</a></li><li class="nav-list-item"><a href="/archives/" target="_self" class="nav-list-link">归档</a></li><li class="nav-list-item"><a href="https://github.com/Focinfi" target="_blank" class="nav-list-link">关于</a></li></ul></header><main class="container"><div class="post"><article class="post-block"><h1 class="post-title">SuperBall开发总结(四)-BOSS出场</h1><div class="post-info">2014年10月13日</div><div class="post-content"><p><a href="http://www.jianshu.com/p/a6022b2ba33d" target="_blank" rel="external">SuperBall开发总结(三)-加入木板</a>后，似乎是有点游戏的样子了，现在，是时候让BOSS出场了。</p>
+<p>####完成效果<br><a href="http://jsfiddle.net/Focinfi/sejrx2Ls/7/" target="_blank" rel="external">SuperBall_03-Add_BOSS</a></p>
+<p>####添加boss类和BOSS数组</p>
+<p>Canvas可以绘制简单的图形，但是这不影响我们想法的表达。我们可以用一些正方形堆积成一个BOSS。</p>
+<p>大概是这个样子</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/17174-d567e2b8f17884bb.png" alt="Boos.png"></p>
+<p>要实现这种绘制效果只需要两步</p>
+<p>1.创建BOSS_SHAPE数组</p>
+<pre><code>var BOSS_SHAPE =
+        [
+            [-1,-1,-2,-1,-1,-1,-1,-1,-2,-1,-1],
+            [-1,-1,-2, 2, 1,-1, 1, 2,-2,-1,-1],
+            [-1,-1,-2, 2, 1,-3, 1, 2,-2,-1,-1],
+            [-1, 2, 1, 2,-2,-2,-2, 2, 1, 2,-1],
+            [-1, 2, 1, 2,-1,-1,-1, 2, 1, 2,-1],
+            [-1,-1,-2,-1,-1,-1,-1,-1,-2,-1,-1],
+            [-1, 1, 3, 1,-1,-1,-1, 1, 3, 1,-1],
+            [-1,-2,-1,-2,-1,-1,-1,-2,-1,-2,-1]
+
+        ];
+</code></pre><p>这个数组其实就是描述了一个 <strong>11 × 7</strong> 矩阵，而每个数字代表了一个方块，不同的数字表示不同的方块类型。 -1：此处为空，2. &lt; -1 的为特殊方块，比如，打不烂的方块或者BOSS的小心脏等等。3. &gt; -1 的为不同级别的方块。</p>
+<p>2.新建boss</p>
+<pre><code>var boss = {
+                margin_left : 50, 
+                margin_top : 10, 
+                vx : 10, 
+                vy : 5,  
+                shape : BOSS_SHAPE};
+</code></pre><p><code>margin_left  margin_right</code>用来表示BOSS相对于canvas左边和上边移量。</p>
+<p>####渲染BOSS</p>
+<pre><code>//render boss
+for(var i = 0; i &lt; boss.shape.length; i++)
+    for(var j = 0; j &lt; boss.shape[i].length; j++){
+
+        if(boss.shape[i][j] != -1){
+            context.beginPath();
+            context.rect(boss.margin_left + (15 + 3) * j,
+                    boss.margin_top + (15 + 3) * i,
+                    15, 15)
+            context.lineWidth = 2;
+            context.strokeStyle = &quot;grey&quot;;
+            context.fillStyle = getBlockColor(boss.shape[i][j]);
+            context.stroke();
+            context.fill();
+            context.closePath();
+        }
+
+    }
+</code></pre><p>遍历<code>BOSS_SHAPE</code>的每个方块，根据每个方块的<code>i j</code>和boss的<code>margin_left margin_right</code>计算出当前绘制方块的具体位置，15是方块的宽度，而3表示方块之间的间隙。</p>
+<p>还有一些辅助数据和函数</p>
+<ol>
+<li><p>添加颜色数组</p>
+<pre><code>var COLORS = [&quot;grey&quot;, &quot;orange&quot;, &quot;blue&quot;, &quot;purple&quot;, &quot;green&quot;];
+</code></pre></li>
+<li><p>添加辅助函数<code>getBlockColor()</code></p>
+<pre><code>function getBlockColor(block_type){
+    var color;
+    switch(block_type){
+        case -3:
+            color = &quot;red&quot;;
+            break;
+        case -2:
+            color = &quot;black&quot;;
+            break;
+        case -1:
+            color = &quot;white&quot;;
+            break;
+        default:
+            color = COLORS[block_type];
+            break;
+    }
+
+    return color;
+}
+</code></pre></li>
+</ol>
+<p>####添加小球碰撞BOSS的检测<br>    //check hit boss</p>
+<pre><code>for(var i = 0; i &lt; boss.shape.length; i++)
+    for(var j = 0; j &lt; boss.shape[i].length; j++)
+        if(boss.shape[i][j] != -1 &amp;&amp; boss.shape[i][j] != 0){
+            if(ball.x &gt;= boss.margin_left + (15 + 3) * j &amp;&amp;
+                    ball.x &lt;= boss.margin_left + (15 + 3) * j + 15 ){
+
+                if(ball.y &lt;= boss.margin_top + (15 + 3) * i + 15 + 10 &amp;&amp;
+                        ball.y &gt;= boss.margin_top + (15 + 3) * i + 15 + 10 - 15 &amp;&amp;
+                        ball.vy &lt; 0){
+
+                    ball.y = boss.margin_top + (15 + 3) * i + 15 + 10;
+                    ball.vy *= -1;
+                    boss.shape[i][j]--;
+
+
+                }else if(ball.y &gt;= boss.margin_top + (15 + 3) * i - 10 &amp;&amp;
+                        ball.y &lt;= boss.margin_top + (15 + 3) * i - 10 + 15&amp;&amp;
+                        ball.vy &gt; 0){
+
+                    ball.y = boss.margin_top + (15 + 3) * i - 10;
+                    ball.vy *= -1;
+                    boss.shape[i][j]--;
+
+                }
+
+            }else if(ball.y &gt;= boss.margin_top + (15 + 3) * i &amp;&amp;
+                    ball.y &lt;= boss.margin_top + (15 + 3) * i + 15){
+                if(ball.x &gt;= boss.margin_left + (15 + 3) * j - 10 &amp;&amp;
+                        ball.x &lt;= boss.margin_left + (15 + 3) * j - 10 + 15 &amp;&amp;
+                        ball.vx &gt; 0){
+
+                    ball.x = boss.margin_left + (15 + 3) * j - 10;
+                    ball.vx *= -1;
+                    boss.shape[i][j]--;
+
+                } else if(ball.x &lt;= boss.margin_left + (15 + 3) * j + 15 + 10 &amp;&amp;
+                        ball.x &gt;= boss.margin_left + (15 + 3) * j + 10 &amp;&amp;
+                        ball.vx &lt; 0){
+
+                    ball.x = boss.margin_left + (15 + 3) * j + 15 + 10;
+                    ball.vx *= -1;
+                    boss.shape[i][j]--;
+                }
+            }
+        }
+</code></pre><p>看似有些复杂，其实很简单</p>
+<ol>
+<li>遍历每个方块</li>
+<li>判断小球撞击方块的那一边，上、下、左、右</li>
+<li>若条件成立，改变方块属性，小球属性</li>
+</ol>
+<p>####添加BOSS移动代码</p>
+<pre><code>//update boss
+boss.margin_left += boss.vx / frequency;
+
+//ensure the boss is in the canvas
+if(boss.margin_left &lt;= 0){
+    boss.margin_left = 0;
+    boss.vx *= -1;
+}
+
+if(boss.margin_left &gt;= 300 - boss.shape[0].length * (15 + 3)){
+    boss.margin_left = 300 - boss.shape[0].length * (15 + 3);
+    boss.vx *= -1;
+}
+</code></pre><p>不要让小球跑出去啊:-).</p>
+<p>####总结<br>在这三的代码积累中，我们的代码质量并不是最优，但是对于现阶段来说，这不重要，因为我们要先将想法用可行的方法实现出来，然后再进行重构，优化。重要的是看到效果，而不是纸上谈兵。</p>
+<p>当然对于学习一些新的东西这种方法最为有效，但是若是做一个大项目，前期的架构设计就非常重要了。</p>
+<p>所以，下一节我们将讨论一下项目结构的一些问题。<br><a href="http://www.jianshu.com/p/8c7f76a6ae21" target="_blank" rel="external">SuperBall开发总结(五)-优化项目结构</a></p>
+</div></article></div></main><footer><div class="paginator"><a href="/2016/03/23/material-for-front-end-beginner/" class="prev">上一篇</a><a href="/2014/10/06/SuperBall开发总结(六)-UI动画设计/" class="next">下一篇</a></div><div class="copyright"><p>© 2015 - 2017 <a href="http://focinfi.wang">王安正</a>, powered by <a href="https://hexo.io/" target="_blank">Hexo</a> and <a href="https://github.com/pinggod/hexo-theme-apollo" target="_blank">hexo-theme-apollo</a>.</p></div></footer></div><script async src="//cdn.bootcss.com/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML" integrity="sha384-crwIf/BuaWM9rM65iM+dWFldgQ1Un8jWZMuh3puxb8TOY9+linwLoI7ZHZT+aekW" crossorigin="anonymous"></script><script>(function(b,o,i,l,e,r){b.GoogleAnalyticsObject=l;b[l]||(b[l]=function(){(b[l].q=b[l].q||[]).push(arguments)});b[l].l=+new Date;e=o.createElement(i);r=o.getElementsByTagName(i)[0];e.src='//www.google-analytics.com/analytics.js';r.parentNode.insertBefore(e,r)}(window,document,'script','ga'));ga('create',"UA-65933410-1",'auto');ga('send','pageview');</script></body></html>
